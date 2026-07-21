@@ -2,7 +2,7 @@ import os
 import json
 import requests
 from pydantic import BaseModel, Field, ValidationError
-from typing import List
+from typing import List, Optional
 from models import Brief, Proposal, AgentEvent, PastProject, RateCardItem
 from database import db_session
 
@@ -10,16 +10,8 @@ NIM_API_KEY = os.environ.get("NIM_API_KEY", "")  # blank is meaningful here — 
 NIM_MODEL = os.environ.get("NIM_MODEL") or "meta/llama-3.1-70b-instruct"
 
 class ProductionBriefSchema(BaseModel):
-    client: str
-    objectives: List[str]
-    audience: str
-    deliverables: List[str]
-    timeline_signals: str
-    budget_signals: str
-    key_stakeholders: List[str]
-    risks: List[str]
-    open_questions: List[str]
     work_type: str = Field(description="One of: change-management campaign, employee engagement, creator campaign, video production, event")
+    rendered_markdown: str
 
 class PricingLineItem(BaseModel):
     category: str
@@ -28,10 +20,7 @@ class PricingLineItem(BaseModel):
     rate_kes: int
 
 class ProposalSchema(BaseModel):
-    approach: str
-    scoped_deliverables: List[str]
-    phased_timeline: List[str]
-    team_shape: List[str]
+    rendered_markdown: str
     pricing: List[PricingLineItem]
 
 def call_nim_api(system_prompt: str, user_prompt: str) -> str:
@@ -93,56 +82,87 @@ def render_brief_markdown(brief_json: dict) -> str:
 """
 
 def generate_brief(transcript_text: str, client_name: str) -> dict:
-    system_prompt = f"""You are the Brief Generator Agent for GDF Kenya. 
-Your job is to read a raw meeting transcript for the client '{client_name}' and produce a structured JSON Production Brief.
-Return ONLY valid JSON matching the exact schema provided. Do not include markdown formatting or conversational text."""
+    system_prompt = f"""You are a Production Brief Generator for a creative agency middleman platform. Your job is to turn a raw meeting notes summary (captured by an AI notetaker during the client's intake call) into a structured, professional Production Brief that a creative team can act on.
 
-    user_prompt = f"""Transcript:
+<task>
+1. Read the summary carefully and extract every piece of information relevant to a production brief.
+2. Where information is missing or ambiguous, do NOT invent it. Instead, list it under "Open Questions" so the agency can follow up.
+3. Organize everything into the Production Brief format below.
+4. Keep language clear and professional — this brief may be shown to both the client and the creative team.
+</task>
+
+<output_format>
+Respond ONLY with a JSON object. The JSON MUST have exactly two keys:
+1. "work_type": A string representing the type of work. Must be one of: change-management campaign, employee engagement, creator campaign, video production, event.
+2. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+
+The Markdown document inside "rendered_markdown" MUST follow this structure. Use "Not specified — needs follow-up" for any field with no information in the summary:
+
+# Production Brief: [Project/Client Name]
+
+## 1. Client Overview
+- Client/Company:
+- Point of contact:
+- Industry/context:
+
+## 2. Project Summary
+[2-3 sentence plain-language summary of what's being requested and why]
+
+## 3. Objectives
+[Bulleted list — what success looks like for this project]
+
+## 4. Target Audience
+[Who the end output is for]
+
+## 5. Deliverables Requested
+[Bulleted list — as specific as the summary allows: format, quantity, platform, etc.]
+
+## 6. Creative Direction / Tone
+[Any style, mood, brand, or reference cues mentioned]
+
+## 7. Timeline
+- Requested deadline(s):
+- Any milestone dates mentioned:
+
+## 8. Budget
+[Only include if explicitly mentioned — never estimate a figure]
+
+## 9. Constraints & Must-Haves
+[Any hard requirements, exclusions, brand guidelines, legal/compliance notes]
+
+## 10. Open Questions
+[Everything that needs clarifying before the creative team can start — this section matters as much as the rest]
+</output_format>"""
+
+    user_prompt = f"""<meeting_summary>
 {transcript_text}
+</meeting_summary>
 
-Output JSON Schema:
-{{
-  "client": "string",
-  "objectives": ["string"],
-  "audience": "string",
-  "deliverables": ["string"],
-  "timeline_signals": "string",
-  "budget_signals": "string",
-  "key_stakeholders": ["string"],
-  "risks": ["string"],
-  "open_questions": ["string"],
-  "work_type": "string (change-management campaign, employee engagement, creator campaign, video production, event)"
-}}"""
+Client Name context: {client_name}"""
 
     try:
         if not NIM_API_KEY:
             # Fallback for local/offline demo use when no NIM_API_KEY is configured.
-            # Kept free of internal/debug text since it renders straight into a client-facing document.
-            print("WARNING: No NIM_API_KEY provided. Using placeholder brief generator.")
+            print("WARNING: No NIM_API_KEY provided. Using dummy brief generator.")
             return {
-                "client": client_name,
-                "objectives": ["Objectives to be finalized based on transcript review"],
-                "audience": "To be defined",
-                "deliverables": ["Deliverable scope to be finalized"],
-                "timeline_signals": "TBD",
-                "budget_signals": "TBD",
-                "key_stakeholders": [],
-                "risks": [],
-                "open_questions": ["What are the primary objectives for this engagement?"],
-                "work_type": "event"
+                "work_type": "event",
+                "rendered_markdown": f"# Production Brief: {client_name}\n\n## 1. Client Overview\n- Client/Company: {client_name}\n- Point of contact: Not specified — needs follow-up\n- Industry/context: Not specified — needs follow-up\n\n## 2. Project Summary\nNot specified — needs follow-up\n\n## 3. Objectives\n- Not specified — needs follow-up\n\n## 4. Target Audience\nNot specified — needs follow-up\n\n## 5. Deliverables Requested\n- Not specified — needs follow-up\n\n## 6. Creative Direction / Tone\nNot specified — needs follow-up\n\n## 7. Timeline\n- Requested deadline(s): Not specified — needs follow-up\n- Any milestone dates mentioned: Not specified — needs follow-up\n\n## 8. Budget\nNot specified — needs follow-up\n\n## 9. Constraints & Must-Haves\nNot specified — needs follow-up\n\n## 10. Open Questions\n- Not specified — needs follow-up"
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        parsed_json = _extract_json(raw_response)
-
-        # Validate schema
+        
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:-3]
+        elif raw_response.startswith("```"):
+            raw_response = raw_response[3:-3]
+            
+        parsed_json = json.loads(raw_response)
         ProductionBriefSchema(**parsed_json)
         return parsed_json
-
-    except (ValidationError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
-        print(f"Agent call/validation failed: {e}. Retrying...")
+        
+    except Exception as e:
+        print(f"Agent validation failed: {e}. Retrying...")
         try:
-            # Retry once
             retry_prompt = user_prompt + f"\n\nPREVIOUS ERROR (Fix this in your new JSON response):\n{str(e)}"
             raw_response = call_nim_api(system_prompt, retry_prompt)
             parsed_json = _extract_json(raw_response)
@@ -151,129 +171,159 @@ Output JSON Schema:
         except Exception as retry_e:
             print(f"Agent validation failed on retry: {retry_e}. Using fallback.")
             return {
-                "client": client_name,
-                "objectives": ["Failed to parse transcript objectives"],
-                "audience": "N/A",
-                "deliverables": ["Error in generation"],
-                "timeline_signals": "TBD",
-                "budget_signals": "TBD",
-                "key_stakeholders": ["N/A"],
-                "risks": ["Agent failed to generate structured data"],
-                "open_questions": ["Please review transcript manually"],
-                "work_type": "event"
+                "work_type": "event",
+                "rendered_markdown": f"# Error generating brief\n\nAgent failed with error: {retry_e}"
             }
 
-def render_proposal_markdown(proposal_json: dict, client_name: str) -> str:
-    pricing_items = proposal_json.get('pricing', []) or []
-    if pricing_items:
-        rows = []
-        grand_total = 0
-        for item in pricing_items:
-            qty = item.get('qty', 1) or 1
-            rate = item.get('rate_kes', 0) or 0
-            line_total = qty * rate
-            grand_total += line_total
-            rows.append(
-                f"| {item.get('category', '')} | {item.get('description', '')} | {qty} | "
-                f"KES {rate:,} | KES {line_total:,} |"
-            )
-        pricing_section = f"""## Pricing Structure
-| Category | Description | Qty | Rate (KES) | Total (KES) |
-|---|---|---|---|---|
-{chr(10).join(rows)}
-| | | | **Total Investment** | **KES {grand_total:,}** |
-"""
-    else:
-        pricing_section = "## Pricing Structure\nNo pricing line items yet.\n"
+def extract_meeting_signals(transcript_text: str) -> str:
+    system_prompt = """You are a Meeting Signal Extractor for a creative agency middleman platform. You will receive a raw transcript from a client review meeting (e.g. a Zoom call), likely with speaker labels, timestamps, filler words, and crosstalk. Your job is NOT to summarize the whole conversation — it is to pull out only what's needed to update a Production Brief and draft a proposal, and discard everything else.
 
-    return f"""# Proposal: {client_name}
+<task>
+Read the full transcript. Ignore small talk, technical difficulties ("can you hear me?"), and off-topic tangents. Extract and categorize everything relevant into these buckets:
 
-## Approach
-{proposal_json.get('approach', 'N/A')}
+1. Decisions made — anything the group explicitly agreed on
+2. New or changed requirements — anything different from what a prior brief would have said
+3. Budget signals — any number, range, or budget-related constraint mentioned, and who said it
+4. Timeline signals — any date, deadline, or scheduling constraint mentioned
+5. Creative feedback — reactions to creative direction, references brought up, likes/dislikes expressed
+6. Action items — anything someone committed to doing, and by whom if stated
+7. Questions raised but unresolved on the call
+8. Questions that appear to have been answered (useful for closing out a prior brief's "Open Questions")
 
-## Note on Changes
-This proposal reflects the updated scope as discussed in the review meeting.
+For anything ambiguous — sarcasm, unclear pronouns, overlapping speech, a point that trails off — do not guess at the meaning. Mark it under "Flagged as Unclear" instead of resolving it silently.
+</task>
 
-## Deliverables
-{chr(10).join(f"- {d}" for d in proposal_json.get('scoped_deliverables', []))}
+<output_format>
+Respond ONLY in this exact structure in Markdown. Leave a bucket empty (write "None") rather than stretching unrelated content to fill it.
 
-## Timeline
-{chr(10).join(f"- {t}" for t in proposal_json.get('phased_timeline', []))}
+## Decisions Made
+## New / Changed Requirements
+## Budget Signals
+## Timeline Signals
+## Creative Feedback
+## Action Items
+## Questions Raised (Unresolved)
+## Questions Answered
+## Flagged as Unclear
+</output_format>"""
 
-## Team Shape
-{chr(10).join(f"- {t}" for t in proposal_json.get('team_shape', []))}
+    user_prompt = f"""<transcript>
+{transcript_text}
+</transcript>"""
 
-{pricing_section}"""
+    if not NIM_API_KEY:
+        return "## Decisions Made\nNone\n## New / Changed Requirements\nNone\n## Budget Signals\nNone\n## Timeline Signals\nNone\n## Creative Feedback\nNone\n## Action Items\nNone\n## Questions Raised (Unresolved)\nNone\n## Questions Answered\nNone\n## Flagged as Unclear\nNone"
+
+    return call_nim_api(system_prompt, user_prompt)
 
 def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], additional_notes: str = "") -> dict:
-    system_prompt = f"""You are the Proposal Generator Agent for GDF Kenya.
-Your job is to combine the original Production Brief, a new follow-up meeting transcript (or review notes), internal rate cards, and past project data to generate a structured Client Proposal.
-Return ONLY valid JSON matching the exact schema provided. Do not include markdown formatting or conversational text."""
-
-    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
-    past_projects_text = chr(10).join(f"Project Type: {p.work_type}\nSummary: {p.summary}\nTypical Pricing: {p.typical_pricing_notes}" for p in past_projects)
-
-    user_prompt = f"""Client: {client_name}
     
-Original Brief JSON:
-{json.dumps(brief.structured_json, indent=2)}
+    extracted_signals = extract_meeting_signals(new_transcript)
+    if additional_notes:
+        extracted_signals += f"\n\n## Manager Additional Notes\n{additional_notes}"
+    
+    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
 
-New Transcript / Notes:
-{new_transcript}
-{("Additional Manager Notes: " + additional_notes) if additional_notes else ""}
+    system_prompt = """You are a Proposal Generator for a creative agency middleman platform. A Production Brief was already created from the client's intake call. Since then, the agency held a client review meeting — its transcript has already been processed by a signal-extraction step, and you now have that structured extraction rather than the raw transcript. Your job is to merge the original brief with the extracted signals into ONE final, coherent, client-ready proposal, and also generate pricing line items.
+
+<task>
+1. Treat the original brief as the baseline.
+2. Apply the extracted signals on top of it:
+   - New/Changed Requirements → update the relevant brief section, and log the change
+   - Budget Signals / Timeline Signals → finalize those fields if they were previously unspecified, or update them if changed
+   - Creative Feedback → fold into "Creative Approach"
+   - Questions Answered → resolve the matching item from the brief's Open Questions
+   - Questions Raised (Unresolved) + anything still in "Flagged as Unclear" that matters → carry into the proposal's Remaining Open Questions
+   - Action Items → note anywhere they affect scope or timeline
+3. If a signal contradicts the original brief, the signal wins (it's more recent) — but state the change explicitly in "What Changed" so nothing is overwritten silently.
+4. Do not invent details that appear in neither input.
+5. Write the final proposal in a persuasive but honest tone — this is the document the client will use to sign off on the work.
+</task>
+
+<output_format>
+Respond ONLY with a JSON object. The JSON MUST have exactly two keys:
+1. "pricing": A list of objects representing pricing line items. Each object must have "category" (string), "description" (string), "qty" (int), and "rate_kes" (int). Base this purely on the Available Rate Card Items and the deliverables required.
+2. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+
+The Markdown document inside "rendered_markdown" MUST follow this exact structure:
+
+# Proposal: [Project/Client Name]
+
+## Executive Summary
+[3-4 sentences: what's being proposed, why it fits the client's goals, and the outcome they can expect]
+
+## Scope of Work
+[Clear bulleted breakdown of deliverables, now finalized]
+
+## Creative Approach
+[How the team plans to execute — incorporating feedback from the review meeting]
+
+## Target Audience & Objectives
+[Carried over/refined from the brief]
+
+## Timeline
+[Finalized milestones and deadlines]
+
+## Investment / Budget
+[Provide the final budget context here based on signals and pricing]
+
+## Terms & Assumptions
+[Any constraints, dependencies, or things the proposal assumes to be true]
+
+## What Changed Since the Initial Brief
+[Short bulleted list — transparency on what shifted after the review meeting, and why]
+
+## Remaining Open Questions
+[Anything still unresolved before work can formally begin — omit this section entirely if none remain]
+</output_format>"""
+
+    user_prompt = f"""<original_brief>
+{brief.rendered_markdown}
+</original_brief>
+
+<extracted_meeting_signals>
+{extracted_signals}
+</extracted_meeting_signals>
 
 Available Rate Card Items (KES):
 {rate_card_text}
 
-Past Comparable Projects:
-{past_projects_text}
-
-Output JSON Schema:
-{{
-  "approach": "string (narrative approach)",
-  "scoped_deliverables": ["string"],
-  "phased_timeline": ["string"],
-  "team_shape": ["string"],
-  "pricing": [
-    {{
-      "category": "string",
-      "description": "string",
-      "qty": 1,
-      "rate_kes": 100000
-    }}
-  ]
-}}"""
+Client Name: {client_name}"""
 
     try:
         if not NIM_API_KEY:
-            print("WARNING: No NIM_API_KEY provided. Using placeholder proposal generator.")
+            print("WARNING: No NIM_API_KEY provided. Using dummy proposal generator.")
             return {
-                "approach": "Approach to be finalized based on the review meeting discussion",
-                "scoped_deliverables": brief.structured_json.get("deliverables", []),
-                "phased_timeline": ["Week 1: Strategy", "Week 2: Execution"],
-                "team_shape": ["Strategist", "Designer"],
-                "pricing": [{"category": "Strategy", "description": "Strategy Phase", "qty": 1, "rate_kes": 80000}]
+                "pricing": [{"category": "Strategy", "description": "Strategy Phase", "qty": 1, "rate_kes": 80000}],
+                "rendered_markdown": f"# Proposal: {client_name}\n\n## Executive Summary\nDummy Proposal\n\n## Scope of Work\n- Dummy\n\n## Creative Approach\nDummy\n\n## Target Audience & Objectives\nDummy\n\n## Timeline\nDummy\n\n## Investment / Budget\nDummy\n\n## Terms & Assumptions\nDummy\n\n## What Changed Since the Initial Brief\nDummy\n\n## Remaining Open Questions\nNone",
+                "extracted_signals": extracted_signals
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        parsed_json = _extract_json(raw_response)
+        
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:-3]
+        elif raw_response.startswith("```"):
+            raw_response = raw_response[3:-3]
+            
+        parsed_json = json.loads(raw_response)
         ProposalSchema(**parsed_json)
+        parsed_json['extracted_signals'] = extracted_signals # return this so app.py can log it
         return parsed_json
-    except (ValidationError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
-        print(f"Agent call/validation failed: {e}. Retrying...")
+        
+    except Exception as e:
+        print(f"Agent validation failed: {e}. Retrying...")
         try:
             retry_prompt = user_prompt + f"\n\nPREVIOUS ERROR (Fix this in your new JSON response):\n{str(e)}"
             raw_response = call_nim_api(system_prompt, retry_prompt)
             parsed_json = _extract_json(raw_response)
             ProposalSchema(**parsed_json)
+            parsed_json['extracted_signals'] = extracted_signals
             return parsed_json
         except Exception as retry_e:
             print(f"Agent validation failed on retry: {retry_e}. Using fallback.")
             return {
-                "approach": "Failed to generate approach",
-                "scoped_deliverables": ["Error in generation"],
-                "phased_timeline": ["TBD"],
-                "team_shape": ["TBD"],
-                "pricing": [{"category": "Error", "description": "Failed to parse pricing", "qty": 1, "rate_kes": 0}]
+                "pricing": [{"category": "Error", "description": "Failed to parse pricing", "qty": 1, "rate_kes": 0}],
+                "rendered_markdown": f"# Error generating proposal\n\nAgent failed with error: {retry_e}",
+                "extracted_signals": extracted_signals
             }
-
