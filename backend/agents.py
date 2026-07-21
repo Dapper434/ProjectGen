@@ -3,7 +3,7 @@ import json
 import requests
 from pydantic import BaseModel, Field, ValidationError
 from typing import List
-from models import Brief, Proposal, AgentEvent
+from models import Brief, Proposal, AgentEvent, PastProject, RateCardItem
 from database import db_session
 
 NIM_API_KEY = os.environ.get("NIM_API_KEY", "")
@@ -105,18 +105,19 @@ Output JSON Schema:
 
     try:
         if not NIM_API_KEY:
-            # Fallback for demo if no API key is provided
-            print("WARNING: No NIM_API_KEY provided. Using dummy brief generator.")
+            # Fallback for local/offline demo use when no NIM_API_KEY is configured.
+            # Kept free of internal/debug text since it renders straight into a client-facing document.
+            print("WARNING: No NIM_API_KEY provided. Using placeholder brief generator.")
             return {
                 "client": client_name,
-                "objectives": ["Understand transcript objectives (dummy)"],
-                "audience": "Target audience (dummy)",
-                "deliverables": ["Deliverable 1", "Deliverable 2"],
-                "timeline_signals": "Q4",
+                "objectives": ["Objectives to be finalized based on transcript review"],
+                "audience": "To be defined",
+                "deliverables": ["Deliverable scope to be finalized"],
+                "timeline_signals": "TBD",
                 "budget_signals": "TBD",
-                "key_stakeholders": ["Marketing"],
-                "risks": ["No API Key"],
-                "open_questions": ["What is the real brief?"],
+                "key_stakeholders": [],
+                "risks": [],
+                "open_questions": ["What are the primary objectives for this engagement?"],
                 "work_type": "event"
             }
 
@@ -223,10 +224,10 @@ Output JSON Schema:
 
     try:
         if not NIM_API_KEY:
-            print("WARNING: No NIM_API_KEY provided. Using dummy proposal generator.")
+            print("WARNING: No NIM_API_KEY provided. Using placeholder proposal generator.")
             return {
-                "approach": "Dummy approach based on new transcript",
-                "scoped_deliverables": brief.structured_json.get("deliverables", []) + ["New Dummy Deliverable"],
+                "approach": "Approach to be finalized based on the review meeting discussion",
+                "scoped_deliverables": brief.structured_json.get("deliverables", []),
                 "phased_timeline": ["Week 1: Strategy", "Week 2: Execution"],
                 "team_shape": ["Strategist", "Designer"],
                 "pricing": [{"category": "Strategy", "description": "Strategy Phase", "qty": 1, "rate_kes": 80000}]

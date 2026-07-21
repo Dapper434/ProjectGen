@@ -1,9 +1,13 @@
 import os
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, send_file
 from flask_cors import CORS
 from database import db_session, init_db
 from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
 from werkzeug.security import check_password_hash
+from weasyprint import HTML
+import io
+import html
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'super-secret-demo-key')
@@ -345,6 +349,274 @@ def get_rate_card():
         "unit": item.unit,
         "rate_kes": item.rate_kes
     } for item in items])
+
+# ---------------------------------------------------------------------------
+# PDF Generation Helpers
+# ---------------------------------------------------------------------------
+# These build the PDF straight from each document's structured_json, mirroring
+# the on-screen report layout, rather than round-tripping through markdown.
+
+def _esc(value):
+    return html.escape(str(value)) if value is not None else ''
+
+
+def _bullets(items, empty_text='None noted'):
+    items = [i for i in (items or []) if i]
+    if not items:
+        return f'<p class="muted">{_esc(empty_text)}</p>'
+    lis = ''.join(f'<li>{_esc(i)}</li>' for i in items)
+    return f'<ul>{lis}</ul>'
+
+
+def _tags(items, empty_text):
+    items = [i for i in (items or []) if i]
+    if not items:
+        return f'<p class="muted">{_esc(empty_text)}</p>'
+    return ''.join(f'<span class="tag">{_esc(i)}</span>' for i in items)
+
+
+PDF_STYLE = '''
+  @page {
+    size: A4;
+    margin: 0;
+    @bottom-center {
+      content: counter(page) " / " counter(pages);
+      font-size: 8.5pt;
+      color: #9ca3af;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.6;
+    color: #374151;
+    margin: 0;
+  }
+  .banner { background: linear-gradient(135deg, ACCENT_FROM, ACCENT_TO); color: #ffffff; padding: 16mm 16mm 12mm 16mm; }
+  .banner .eyebrow { font-size: 8.5pt; letter-spacing: 0.15em; text-transform: uppercase; opacity: 0.85; margin: 0 0 8px 0; }
+  .banner h1 { font-size: 24pt; margin: 0; color: #ffffff; font-weight: 700; }
+  .banner .badge { display: inline-block; background: rgba(255,255,255,0.18); padding: 4px 13px; border-radius: 999px; font-size: 9pt; margin-top: 12px; }
+  .body { padding: 14mm 16mm 4mm 16mm; }
+  .section { margin-bottom: 20px; }
+  .section-label { font-size: 8.5pt; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: ACCENT_FROM; margin: 0 0 8px 0; }
+  .muted { color: #9ca3af; font-style: italic; margin: 0; }
+  .info-grid { display: flex; gap: 12px; margin-bottom: 22px; }
+  .info-box { flex: 1; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 11px 14px; }
+  .info-box .label { font-size: 8pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 3px; }
+  .info-box .value { font-size: 10pt; color: #111827; }
+  .tag { display: inline-block; font-size: 9pt; padding: 4px 11px; border-radius: 999px; margin: 0 6px 6px 0; background: ACCENT_TINT; color: ACCENT_FROM; border: 1px solid ACCENT_TINT_BORDER; }
+  .callout { border-radius: 8px; padding: 13px 16px; margin-bottom: 20px; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+  .callout .section-label { color: #92400e; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  p { margin: 0; }
+  table.pricing { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin-top: 6px; }
+  table.pricing th { background: #f3f4f6; color: #6b7280; font-weight: 600; text-align: left; padding: 9px 12px; border: 1px solid #e5e7eb; }
+  table.pricing td { padding: 9px 12px; border: 1px solid #e5e7eb; }
+  table.pricing tfoot td { font-weight: 700; color: #111827; border-top: 2px solid #111827; background: #f9fafb; }
+  .footer { padding: 14px 16mm 24px 16mm; border-top: 1px solid #e5e7eb; font-size: 8.5pt; color: #9ca3af; text-align: center; margin-top: 10px; }
+'''
+
+
+def _pdf_shell(accent_from, accent_to, accent_tint, accent_tint_border, eyebrow, heading, badge, body_html):
+    style = (PDF_STYLE
+             .replace('ACCENT_TINT_BORDER', accent_tint_border)
+             .replace('ACCENT_TINT', accent_tint)
+             .replace('ACCENT_FROM', accent_from)
+             .replace('ACCENT_TO', accent_to))
+    badge_html = f'<span class="badge">{_esc(badge)}</span>' if badge else ''
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>{style}</style>
+</head>
+<body>
+<div class="banner">
+  <p class="eyebrow">FactoryOS &middot; {_esc(eyebrow)}</p>
+  <h1>{_esc(heading)}</h1>
+  {badge_html}
+</div>
+<div class="body">
+{body_html}
+</div>
+<div class="footer">Generated by FactoryOS on {datetime.now().strftime('%B %d, %Y')}</div>
+</body>
+</html>'''
+
+
+def build_brief_pdf_html(brief, client_name):
+    data = brief.structured_json or {}
+    work_type = (data.get('work_type') or '').replace('-', ' ').title()
+
+    body = f'''
+      <div class="section">
+        <p class="section-label">Objectives</p>
+        {_bullets(data.get('objectives'))}
+      </div>
+      <div class="section">
+        <p class="section-label">Audience</p>
+        <p>{_esc(data.get('audience') or 'Not specified')}</p>
+      </div>
+      <div class="section">
+        <p class="section-label">Deliverables</p>
+        {_bullets(data.get('deliverables'))}
+      </div>
+      <div class="info-grid">
+        <div class="info-box">
+          <div class="label">Timeline</div>
+          <div class="value">{_esc(data.get('timeline_signals') or 'TBD')}</div>
+        </div>
+        <div class="info-box">
+          <div class="label">Budget</div>
+          <div class="value">{_esc(data.get('budget_signals') or 'TBD')}</div>
+        </div>
+      </div>
+      <div class="section">
+        <p class="section-label">Key Stakeholders</p>
+        {_tags(data.get('key_stakeholders'), 'None noted')}
+      </div>
+      {f'<div class="callout"><p class="section-label">Risks</p>{_bullets(data.get("risks"))}</div>' if data.get('risks') else ''}
+      {f'<div class="section"><p class="section-label">Open Questions</p>{_bullets(data.get("open_questions"))}</div>' if data.get('open_questions') else ''}
+    '''
+
+    return _pdf_shell(
+        accent_from='#4f46e5', accent_to='#4338ca',
+        accent_tint='#eef2ff', accent_tint_border='#e0e7ff',
+        eyebrow='Production Brief',
+        heading=client_name,
+        badge=work_type or None,
+        body_html=body
+    )
+
+
+def build_proposal_pdf_html(proposal, client_name):
+    data = proposal.structured_json or {}
+    pricing_items = proposal.pricing_line_items or []
+
+    rows = ''
+    grand_total = 0
+    for item in pricing_items:
+        qty = item.get('qty', 1) or 1
+        rate = item.get('rate_kes', 0) or 0
+        line_total = qty * rate
+        grand_total += line_total
+        rows += f'''
+          <tr>
+            <td>{_esc(item.get('category', ''))}</td>
+            <td>{_esc(item.get('description', ''))}</td>
+            <td style="text-align:center;">{qty}</td>
+            <td style="text-align:right;">KES {rate:,}</td>
+            <td style="text-align:right;">KES {line_total:,}</td>
+          </tr>'''
+
+    pricing_html = ''
+    if pricing_items:
+        pricing_html = f'''
+          <div class="section">
+            <p class="section-label">Pricing Structure</p>
+            <table class="pricing">
+              <thead>
+                <tr>
+                  <th>Category</th><th>Description</th><th style="text-align:center;">Qty</th>
+                  <th style="text-align:right;">Rate (KES)</th><th style="text-align:right;">Total (KES)</th>
+                </tr>
+              </thead>
+              <tbody>{rows}</tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="4" style="text-align:right;">Total Investment</td>
+                  <td style="text-align:right;">KES {grand_total:,}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>'''
+
+    body = f'''
+      <div class="section">
+        <p class="section-label">Approach</p>
+        <p>{_esc(data.get('approach') or 'Not specified')}</p>
+      </div>
+      <div class="section">
+        <p class="section-label">Scoped Deliverables</p>
+        {_bullets(data.get('scoped_deliverables'))}
+      </div>
+      <div class="section">
+        <p class="section-label">Phased Timeline</p>
+        {_bullets(data.get('phased_timeline'))}
+      </div>
+      <div class="section">
+        <p class="section-label">Team Shape</p>
+        {_tags(data.get('team_shape'), 'Not specified')}
+      </div>
+      {pricing_html}
+    '''
+
+    return _pdf_shell(
+        accent_from='#059669', accent_to='#047857',
+        accent_tint='#ecfdf5', accent_tint_border='#d1fae5',
+        eyebrow='Client Proposal',
+        heading=client_name,
+        badge='Approved' if proposal.status == 'approved' else None,
+        body_html=body
+    )
+
+
+@app.route('/api/engagements/<int:eng_id>/brief/pdf', methods=['GET'])
+def download_brief_pdf(eng_id):
+    eng = db_session.query(Engagement).get(eng_id)
+    if not eng:
+        return jsonify({"error": "Engagement not found"}), 404
+
+    brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
+    if not brief:
+        return jsonify({"error": "No brief found for this engagement"}), 404
+
+    try:
+        html_content = build_brief_pdf_html(brief, eng.client.name)
+        pdf_buffer = io.BytesIO()
+        HTML(string=html_content).write_pdf(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        filename = f"{eng.client.name.replace(' ', '_')}_Production_Brief.pdf"
+        return send_file(
+            pdf_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
+
+
+@app.route('/api/engagements/<int:eng_id>/proposal/pdf', methods=['GET'])
+def download_proposal_pdf(eng_id):
+    eng = db_session.query(Engagement).get(eng_id)
+    if not eng:
+        return jsonify({"error": "Engagement not found"}), 404
+
+    proposal = db_session.query(Proposal).filter_by(engagement_id=eng_id).order_by(Proposal.id.desc()).first()
+    if not proposal:
+        return jsonify({"error": "No proposal found for this engagement"}), 404
+
+    try:
+        html_content = build_proposal_pdf_html(proposal, eng.client.name)
+        pdf_buffer = io.BytesIO()
+        HTML(string=html_content).write_pdf(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        filename = f"{eng.client.name.replace(' ', '_')}_Client_Proposal.pdf"
+        return send_file(
+            pdf_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     init_db()
