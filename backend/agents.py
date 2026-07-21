@@ -6,11 +6,19 @@ from typing import List, Optional
 from models import Brief, Proposal, AgentEvent, PastProject, RateCardItem
 from database import db_session
 
-NIM_API_KEY = os.environ.get("NIM_API_KEY", "")  # blank is meaningful here — it's the "not configured" signal
-NIM_MODEL = os.environ.get("NIM_MODEL") or "meta/llama-3.1-70b-instruct"
+NIM_API_KEY = os.environ.get("NIM_API_KEY")
+NIM_MODEL = os.environ.get("NIM_MODEL")
 
 class ProductionBriefSchema(BaseModel):
     work_type: str = Field(description="One of: change-management campaign, employee engagement, creator campaign, video production, event")
+    objectives: List[str] = Field(default_factory=list)
+    audience: str = ""
+    deliverables: List[str] = Field(default_factory=list)
+    timeline_signals: str = ""
+    budget_signals: str = ""
+    key_stakeholders: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
     rendered_markdown: str
 
 class PricingLineItem(BaseModel):
@@ -20,6 +28,10 @@ class PricingLineItem(BaseModel):
     rate_kes: int
 
 class ProposalSchema(BaseModel):
+    approach: str = ""
+    scoped_deliverables: List[str] = Field(default_factory=list)
+    phased_timeline: List[str] = Field(default_factory=list)
+    team_shape: List[str] = Field(default_factory=list)
     rendered_markdown: str
     pricing: List[PricingLineItem]
 
@@ -36,10 +48,13 @@ def call_nim_api(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.2,
-        "max_tokens": 4096,
+        # The proposal/brief schemas carry both the structured fields (objectives,
+        # deliverables, pricing, ...) AND the full rendered_markdown document, which
+        # is enough combined output to truncate mid-JSON at the old 4096 cap.
+        "max_tokens": 8192,
     }
-    
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
     response.raise_for_status()
     data = response.json()
     return data['choices'][0]['message']['content']
@@ -92,9 +107,19 @@ def generate_brief(transcript_text: str, client_name: str) -> dict:
 </task>
 
 <output_format>
-Respond ONLY with a JSON object. The JSON MUST have exactly two keys:
+Respond ONLY with a JSON object. The JSON MUST have exactly these keys:
 1. "work_type": A string representing the type of work. Must be one of: change-management campaign, employee engagement, creator campaign, video production, event.
-2. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+2. "objectives": A list of short strings — what success looks like for this project.
+3. "audience": A short string — who the end output is for.
+4. "deliverables": A list of short strings — the concrete deliverables requested (format/quantity/platform where known).
+5. "timeline_signals": A short string summarizing requested deadlines/milestones, or "Not specified — needs follow-up".
+6. "budget_signals": A short string with any budget explicitly mentioned, or "Not specified — needs follow-up".
+7. "key_stakeholders": A list of short strings naming people/roles mentioned (point of contact, decision-makers), empty list if none.
+8. "risks": A list of short strings — hard constraints, exclusions, or risks called out, empty list if none.
+9. "open_questions": A list of short strings — everything that needs clarifying before the creative team can start.
+10. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+
+The structured fields above and the "rendered_markdown" document must tell the same story — the fields are the same content broken into discrete pieces for the UI, not a separate analysis.
 
 The Markdown document inside "rendered_markdown" MUST follow this structure. Use "Not specified — needs follow-up" for any field with no information in the summary:
 
@@ -146,20 +171,22 @@ Client Name context: {client_name}"""
             print("WARNING: No NIM_API_KEY provided. Using dummy brief generator.")
             return {
                 "work_type": "event",
+                "objectives": ["Not specified — needs follow-up"],
+                "audience": "Not specified — needs follow-up",
+                "deliverables": ["Not specified — needs follow-up"],
+                "timeline_signals": "Not specified — needs follow-up",
+                "budget_signals": "Not specified — needs follow-up",
+                "key_stakeholders": [],
+                "risks": [],
+                "open_questions": ["Not specified — needs follow-up"],
                 "rendered_markdown": f"# Production Brief: {client_name}\n\n## 1. Client Overview\n- Client/Company: {client_name}\n- Point of contact: Not specified — needs follow-up\n- Industry/context: Not specified — needs follow-up\n\n## 2. Project Summary\nNot specified — needs follow-up\n\n## 3. Objectives\n- Not specified — needs follow-up\n\n## 4. Target Audience\nNot specified — needs follow-up\n\n## 5. Deliverables Requested\n- Not specified — needs follow-up\n\n## 6. Creative Direction / Tone\nNot specified — needs follow-up\n\n## 7. Timeline\n- Requested deadline(s): Not specified — needs follow-up\n- Any milestone dates mentioned: Not specified — needs follow-up\n\n## 8. Budget\nNot specified — needs follow-up\n\n## 9. Constraints & Must-Haves\nNot specified — needs follow-up\n\n## 10. Open Questions\n- Not specified — needs follow-up"
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:-3]
-        elif raw_response.startswith("```"):
-            raw_response = raw_response[3:-3]
-            
-        parsed_json = json.loads(raw_response)
+        parsed_json = _extract_json(raw_response)
         ProductionBriefSchema(**parsed_json)
         return parsed_json
-        
+
     except Exception as e:
         print(f"Agent validation failed: {e}. Retrying...")
         try:
@@ -172,6 +199,14 @@ Client Name context: {client_name}"""
             print(f"Agent validation failed on retry: {retry_e}. Using fallback.")
             return {
                 "work_type": "event",
+                "objectives": [],
+                "audience": "",
+                "deliverables": [],
+                "timeline_signals": "",
+                "budget_signals": "",
+                "key_stakeholders": [],
+                "risks": [f"Brief generation failed: {retry_e}"],
+                "open_questions": [],
                 "rendered_markdown": f"# Error generating brief\n\nAgent failed with error: {retry_e}"
             }
 
@@ -241,9 +276,15 @@ def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_
 </task>
 
 <output_format>
-Respond ONLY with a JSON object. The JSON MUST have exactly two keys:
-1. "pricing": A list of objects representing pricing line items. Each object must have "category" (string), "description" (string), "qty" (int), and "rate_kes" (int). Base this purely on the Available Rate Card Items and the deliverables required.
-2. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+Respond ONLY with a JSON object. The JSON MUST have exactly these keys:
+1. "approach": A short string (2-3 sentences) summarizing the creative approach — this also drives the "Creative Approach" section.
+2. "scoped_deliverables": A list of short strings — the finalized deliverables, one per item.
+3. "phased_timeline": A list of short strings, one per phase/milestone (e.g. "Week 1-2: Video Production").
+4. "team_shape": A list of short strings naming the roles staffed on this engagement (e.g. "Project Manager", "Creative Director"), empty list if not determinable.
+5. "pricing": A list of objects representing pricing line items. Each object must have "category" (string), "description" (string), "qty" (int), and "rate_kes" (int). Base this purely on the Available Rate Card Items and the deliverables required.
+6. "rendered_markdown": A string containing the exact Markdown document described below. Use \\n for newlines in the string.
+
+The structured fields above and the "rendered_markdown" document must tell the same story — the fields are the same content broken into discrete pieces for the UI, not a separate analysis.
 
 The Markdown document inside "rendered_markdown" MUST follow this exact structure:
 
@@ -294,23 +335,21 @@ Client Name: {client_name}"""
         if not NIM_API_KEY:
             print("WARNING: No NIM_API_KEY provided. Using dummy proposal generator.")
             return {
+                "approach": "Not specified — needs follow-up",
+                "scoped_deliverables": ["Not specified — needs follow-up"],
+                "phased_timeline": ["Not specified — needs follow-up"],
+                "team_shape": [],
                 "pricing": [{"category": "Strategy", "description": "Strategy Phase", "qty": 1, "rate_kes": 80000}],
                 "rendered_markdown": f"# Proposal: {client_name}\n\n## Executive Summary\nDummy Proposal\n\n## Scope of Work\n- Dummy\n\n## Creative Approach\nDummy\n\n## Target Audience & Objectives\nDummy\n\n## Timeline\nDummy\n\n## Investment / Budget\nDummy\n\n## Terms & Assumptions\nDummy\n\n## What Changed Since the Initial Brief\nDummy\n\n## Remaining Open Questions\nNone",
                 "extracted_signals": extracted_signals
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:-3]
-        elif raw_response.startswith("```"):
-            raw_response = raw_response[3:-3]
-            
-        parsed_json = json.loads(raw_response)
+        parsed_json = _extract_json(raw_response)
         ProposalSchema(**parsed_json)
         parsed_json['extracted_signals'] = extracted_signals # return this so app.py can log it
         return parsed_json
-        
+
     except Exception as e:
         print(f"Agent validation failed: {e}. Retrying...")
         try:
@@ -323,6 +362,10 @@ Client Name: {client_name}"""
         except Exception as retry_e:
             print(f"Agent validation failed on retry: {retry_e}. Using fallback.")
             return {
+                "approach": "",
+                "scoped_deliverables": [],
+                "phased_timeline": [],
+                "team_shape": [],
                 "pricing": [{"category": "Error", "description": "Failed to parse pricing", "qty": 1, "rate_kes": 0}],
                 "rendered_markdown": f"# Error generating proposal\n\nAgent failed with error: {retry_e}",
                 "extracted_signals": extracted_signals
