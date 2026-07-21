@@ -98,42 +98,43 @@ export default function SearchBar() {
   };
 
   return (
-    <div ref={containerRef} className="relative w-full max-w-md">
+    <div ref={containerRef} className="relative flex-1 max-w-md">
       <div className="relative">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#5c5c55]" />
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => query.trim().length >= 2 && setOpen(true)}
           onKeyDown={handleKeyDown}
-          placeholder="Search clients, briefs, proposals..."
-          className="w-full bg-zinc-900 border border-zinc-800 rounded-md pl-9 pr-8 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 transition-colors"
+          placeholder="Search engagements, clients…"
+          className="w-full pl-8 pr-8 py-1.5 text-[13px] text-[#d6d4c9] placeholder:text-[#5c5c55] rounded-lg focus:outline-none focus:ring-0 transition-colors"
+          style={{ background: '#151515', border: '1px solid #242424' }}
         />
         {query && (
           <button
             onClick={() => { setQuery(''); setResults([]); setOpen(false); }}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5c5c55] hover:text-[#8a8a83]"
           >
-            <X size={14} />
+            <X size={12} />
           </button>
         )}
       </div>
 
       {open && query.trim().length >= 2 && (
-        <div className="absolute z-20 mt-2 w-full bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl overflow-hidden">
+        <div className="absolute z-20 mt-2 w-full rounded-lg shadow-xl overflow-hidden" style={{ background: '#151515', border: '1px solid #242424' }}>
           {loading ? (
-            <div className="px-4 py-3 text-xs text-zinc-500">Searching...</div>
+            <div className="px-4 py-3 text-xs text-[#6e6e67]">Searching…</div>
           ) : results.length === 0 ? (
-            <div className="px-4 py-3 text-xs text-zinc-500">No matches for "{query}"</div>
+            <div className="px-4 py-3 text-xs text-[#6e6e67]">No matches for "{query}"</div>
           ) : (
-            <ul className="max-h-96 overflow-auto divide-y divide-zinc-800">
+            <ul className="max-h-96 overflow-auto divide-y" style={{ borderColor: '#191919' }}>
               {groups.map((group) => (
                 <li key={group.client_name}>
-                  <div className="px-4 pt-2.5 pb-1.5 flex items-center gap-2 bg-zinc-950/60">
-                    <span className="text-xs font-medium text-zinc-200 truncate">{group.client_name}</span>
+                  <div className="px-4 pt-2.5 pb-1.5 flex items-center gap-2 bg-[#1a1a1a]">
+                    <span className="text-xs font-medium text-[#d6d4c9] truncate">{group.client_name}</span>
                     {group.items.length > 1 && (
-                      <span className="text-[10px] text-zinc-500">({group.items.length} engagements)</span>
+                      <span className="text-[10px] text-[#6e6e67]">({group.items.length} engagements)</span>
                     )}
                   </div>
                   <ul>
@@ -142,17 +143,17 @@ export default function SearchBar() {
                         <button
                           onClick={() => goTo(r.id)}
                           onMouseEnter={() => setHighlightIndex(flatItems.indexOf(r))}
-                          className={`w-full text-left pl-6 pr-4 py-2 transition-colors flex items-start justify-between gap-3 ${flatItems[highlightIndex] === r ? 'bg-zinc-800/80' : 'hover:bg-zinc-800/60'}`}
+                          className={`w-full text-left pl-6 pr-4 py-2 transition-colors flex items-start justify-between gap-3 ${flatItems[highlightIndex] === r ? 'bg-[#1a1a1a]' : 'hover:bg-[#1a1a1a]'}`}
                         >
                           <div className="min-w-0">
-                            <p className="text-xs text-zinc-400">
+                            <p className="text-xs text-[#8a8a83]">
                               Engagement #{r.id.toString().padStart(4, '0')} · {r.status.replace(/_/g, ' ')}
                             </p>
                             {r.preview && (
-                              <p className="text-xs text-zinc-500 mt-0.5 truncate">{r.preview}</p>
+                              <p className="text-xs text-[#6e6e67] mt-0.5 truncate">{r.preview}</p>
                             )}
                           </div>
-                          <span className="shrink-0 text-[10px] font-medium tracking-wide uppercase text-indigo-400 bg-indigo-500/10 px-2 py-1 rounded-full">
+                          <span className="shrink-0 text-[10px] font-mono font-medium tracking-wide uppercase text-[#e8c34a] px-2 py-1 rounded-full" style={{ background: 'rgba(201,151,31,0.14)' }}>
                             {MATCH_LABELS[r.match] || r.match}
                           </span>
                         </button>

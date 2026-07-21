@@ -1,10 +1,124 @@
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://static.figma.com/font/DMSerifDisplay-Regular_2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://static.figma.com/font/InstrumentSans_wdth_wght__1') format('woff2');
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('https://static.figma.com/font/InstrumentSans_wdth_wght__1') format('woff2');
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('https://static.figma.com/font/InstrumentSans_wdth_wght__1') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://static.figma.com/font/JetBrainsMono_wght__1') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('https://static.figma.com/font/JetBrainsMono_wght__1') format('woff2');
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  body {
-    @apply bg-zinc-950 text-zinc-50 antialiased;
-    font-family: 'Inter', system-ui, sans-serif;
-  }
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #e2e8f0 transparent;
 }
+
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 2px; }
+
+html, body, #root {
+  height: 100%;
+  background: #ffffff;
+}
+
+body {
+  color: #172033;
+  font-size: 17px;
+  line-height: 1.55;
+  font-family: 'Instrument Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Light-mode bridge for the design screens. The page components keep the
+   original dark hex utility classes from the Figma export; these selectors
+   remap them to the shared light palette so the app matches the design
+   preview exactly. */
+:where([class~="bg-[#0a0a0a]"], [class~="bg-[#0e0e0e]"], [class~="bg-[#101010]"], [class~="bg-[#141414]"], [class~="bg-[#151515]"]) { background-color: #ffffff !important; }
+:where([class~="bg-[#1a1a1a]"]) { background-color: #f8fafc !important; }
+:where([class~="hover:bg-[#1a1a1a]"]:hover) { background-color: #f8fafc !important; }
+
+:where([class~="border-[#242424]"], [class~="border-[#262626]"]) { border-color: #e2e8f0 !important; }
+:where([class~="border-[#333333]"], [class~="hover:border-[#333333]"]:hover) { border-color: #cbd5e1 !important; }
+:where([class~="border-[#191919]"]) { border-color: #e2e8f0 !important; }
+
+:where([class~="text-[#f7f5ef]"], [class~="text-[#f2f0e8]"]) { color: #172033 !important; }
+:where([class~="text-[#d6d4c9]"]) { color: #334155 !important; }
+:where([class~="text-[#a3a39c]"], [class~="text-[#8a8a83]"], [class~="text-[#6e6e67]"], [class~="text-[#5c5c55]"]) { color: #64748b !important; }
+:where([class~="text-[#c9971f]"], [class~="text-[#e8c34a]"]) { color: #a16207 !important; }
+:where([class~="bg-[#c9971f]"]) { background-color: #a16207 !important; }
+:where([class~="hover:bg-[#a67a17]"]:hover) { background-color: #854d0e !important; }
+
+/* Inline cards, panels, and gradients use the same light surfaces. */
+:where([style*="rgb(10, 10, 10)"], [style*="rgb(14, 14, 14)"], [style*="rgb(16, 16, 16)"], [style*="rgb(20, 20, 20)"], [style*="rgb(21, 21, 21)"]) { background: #ffffff !important; }
+:where([style*="rgb(26, 26, 26)"]) { background: #f8fafc !important; }
+:where([style*="rgb(36, 36, 36)"], [style*="rgb(38, 38, 38)"]) { border-color: #e2e8f0 !important; }
+:where([style*="rgb(25, 25, 25)"]) { border-color: #e2e8f0 !important; }
+
+/* Preserve readable hierarchy after moving the legacy dark UI to a light canvas.
+   The original 9–12px labels were too small for controls, status chips, and
+   secondary information, especially at normal browser zoom. */
+:where([class~="text-[9px]"], [class~="text-[10px]"]) {
+  font-size: 0.8125rem !important;
+  line-height: 1.125rem !important;
+}
+
+:where([class~="text-[11px]"]) {
+  font-size: 0.875rem !important;
+  line-height: 1.25rem !important;
+}
+
+:where([class~="text-[12px]"], [class~="text-xs"]) {
+  font-size: 0.9375rem !important;
+  line-height: 1.375rem !important;
+}
+
+:where([class~="text-[13px]"]) {
+  font-size: 1rem !important;
+  line-height: 1.5rem !important;
+}
+
+/* Direct SVG strokes retain a legible muted tone on white. */
+[stroke="#5c5c55"] { stroke: #64748b; }

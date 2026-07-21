@@ -1,4 +1,10 @@
 import json
+from dotenv import load_dotenv
+
+# Load .env before database.py reads DATABASE_URL, so seeding always targets
+# the same database the Flask app (which also loads .env) will serve from.
+load_dotenv()
+
 from database import init_db, db_session
 from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
 from werkzeug.security import generate_password_hash

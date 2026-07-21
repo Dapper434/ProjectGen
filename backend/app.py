@@ -142,6 +142,8 @@ def get_engagement(eng_id):
     return jsonify({
         "id": eng.id,
         "client_name": eng.client.name,
+        "client_industry": eng.client.industry,
+        "client_notes": eng.client.notes,
         "status": eng.status,
         "brief": {
             "id": brief.id,
