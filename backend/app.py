@@ -1,16 +1,23 @@
 import os
+from dotenv import load_dotenv
+
+# Load backend/.env (if present) before anything reads os.environ — this must happen
+# before agents.py is imported, since it reads NIM_API_KEY at module-import time.
+load_dotenv()
+
 from flask import Flask, request, jsonify, session, send_file
 from flask_cors import CORS
 from database import db_session, init_db
 from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
 from werkzeug.security import check_password_hash
+from sqlalchemy import cast, String
 from weasyprint import HTML
 import io
 import html
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'super-secret-demo-key')
+app.secret_key = os.environ.get('SECRET_KEY') or 'super-secret-demo-key'
 CORS(app, supports_credentials=True)
 
 @app.teardown_appcontext
@@ -104,14 +111,17 @@ def clients_list():
         if not name:
             return jsonify({"error": "Company name is required"}), 400
 
+        # A company name is not a unique identifier — the same client legitimately gets
+        # multiple engagements over time. Reuse the existing record instead of blocking
+        # (or worse, encouraging a near-duplicate name typed to route around a 409).
         existing_client = db_session.query(Client).filter(Client.name.ilike(name)).first()
         if existing_client:
-            return jsonify({"error": "A company with that name already exists"}), 409
+            return jsonify({"id": existing_client.id, "name": existing_client.name, "reused": True}), 200
 
         client = Client(name=name, industry=industry or None, notes=notes or None)
         db_session.add(client)
         db_session.commit()
-        return jsonify({"id": client.id, "name": client.name}), 201
+        return jsonify({"id": client.id, "name": client.name, "reused": False}), 201
 
     clients = db_session.query(Client).order_by(Client.name.asc()).all()
     return jsonify([
@@ -349,6 +359,194 @@ def get_rate_card():
         "unit": item.unit,
         "rate_kes": item.rate_kes
     } for item in items])
+
+# ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+
+PIPELINE_STAGES = ['awaiting_transcript', 'brief_ready', 'awaiting_review_transcript', 'proposal_ready', 'in_review', 'approved']
+
+
+def _line_item_total(items):
+    return sum((item.get('qty', 1) or 1) * (item.get('rate_kes', 0) or 0) for item in (items or []))
+
+
+def _avg_hours(deltas_seconds):
+    if not deltas_seconds:
+        return None
+    return round(sum(deltas_seconds) / len(deltas_seconds) / 3600, 2)
+
+
+def _format_kes(n):
+    n = n or 0
+    if abs(n) >= 1_000_000:
+        return f"KES {n / 1_000_000:.2f}M"
+    if abs(n) >= 1_000:
+        return f"KES {n / 1_000:.1f}K"
+    return f"KES {n:,}"
+
+
+def _snippet(text, length=90):
+    text = (text or '').strip().replace('\n', ' ')
+    return text if len(text) <= length else text[:length].rstrip() + '…'
+
+
+@app.route('/api/analytics', methods=['GET'])
+def get_analytics():
+    engagements = db_session.query(Engagement).all()
+    clients = db_session.query(Client).all()
+    briefs = db_session.query(Brief).all()
+    proposals = db_session.query(Proposal).all()
+    events = db_session.query(AgentEvent).order_by(AgentEvent.created_at.desc()).all()
+
+    # Funnel: engagement count per pipeline stage
+    status_counts = {}
+    for eng in engagements:
+        status_counts[eng.status] = status_counts.get(eng.status, 0) + 1
+    funnel = [{"status": s, "count": status_counts.get(s, 0)} for s in PIPELINE_STAGES]
+
+    # Pipeline value (open) vs approved revenue, using each engagement's latest proposal
+    latest_proposal_by_eng = {}
+    for p in proposals:
+        current = latest_proposal_by_eng.get(p.engagement_id)
+        if current is None or p.version > current.version:
+            latest_proposal_by_eng[p.engagement_id] = p
+
+    pipeline_value_kes = 0
+    approved_revenue_kes = 0
+    for p in latest_proposal_by_eng.values():
+        total = _line_item_total(p.pricing_line_items)
+        if p.status == 'approved':
+            approved_revenue_kes += total
+        else:
+            pipeline_value_kes += total
+
+    # Work-type mix, from generated briefs
+    work_type_counts = {}
+    for b in briefs:
+        wt = (b.work_type or 'unspecified').replace('-', ' ').replace('_', ' ')
+        work_type_counts[wt] = work_type_counts.get(wt, 0) + 1
+    work_type_breakdown = sorted(
+        [{"work_type": k, "count": v} for k, v in work_type_counts.items()],
+        key=lambda x: -x['count']
+    )
+
+    # Turnaround time per pipeline hop
+    transcript_to_brief = []
+    for b in briefs:
+        t = db_session.query(Transcript).get(b.transcript_id)
+        if t and t.uploaded_at and b.created_at:
+            transcript_to_brief.append((b.created_at - t.uploaded_at).total_seconds())
+
+    brief_to_proposal = []
+    for p in proposals:
+        b = db_session.query(Brief).get(p.brief_id)
+        if b and b.created_at and p.created_at:
+            brief_to_proposal.append((p.created_at - b.created_at).total_seconds())
+
+    approval_time_by_eng = {e.engagement_id: e.created_at for e in events if e.action == 'Approved Proposal'}
+    proposal_to_approval = []
+    for eng_id, approved_at in approval_time_by_eng.items():
+        p = latest_proposal_by_eng.get(eng_id)
+        if p and p.created_at:
+            proposal_to_approval.append((approved_at - p.created_at).total_seconds())
+
+    turnaround = {
+        "transcript_to_brief_hours": _avg_hours(transcript_to_brief),
+        "brief_to_proposal_hours": _avg_hours(brief_to_proposal),
+        "proposal_to_approval_hours": _avg_hours(proposal_to_approval),
+    }
+
+    # Send-back / friction rate: share of proposed engagements that needed at least one revision
+    engs_with_sendback = {e.engagement_id for e in events if e.action == 'Regenerated Proposal'}
+    engs_reached_proposal = set(latest_proposal_by_eng.keys())
+    send_back_rate = round(100 * len(engs_with_sendback) / len(engs_reached_proposal), 1) if engs_reached_proposal else 0
+
+    # Client proposals list — one row per engagement's latest proposal, most recent first
+    proposals_list = []
+    for eng_id, p in latest_proposal_by_eng.items():
+        eng = db_session.query(Engagement).get(eng_id)
+        proposals_list.append({
+            "engagement_id": eng_id,
+            "client_name": eng.client.name if eng else "Unknown",
+            "status": p.status,
+            "version": p.version,
+            "total_kes": _line_item_total(p.pricing_line_items),
+            "created_at": p.created_at.isoformat() if p.created_at else None
+        })
+    proposals_list.sort(key=lambda x: x['created_at'] or '', reverse=True)
+
+    # Agency-wide recent activity feed
+    recent_activity = []
+    for e in events[:12]:
+        eng = db_session.query(Engagement).get(e.engagement_id)
+        recent_activity.append({
+            "engagement_id": e.engagement_id,
+            "client_name": eng.client.name if eng else "Unknown",
+            "agent": e.agent,
+            "action": e.action,
+            "reasoning_summary": e.reasoning_summary,
+            "created_at": e.created_at.isoformat()
+        })
+
+    return jsonify({
+        "totals": {
+            "clients": len(clients),
+            "engagements": len(engagements),
+            "approved": status_counts.get('approved', 0)
+        },
+        "funnel": funnel,
+        "pipeline_value_kes": pipeline_value_kes,
+        "approved_revenue_kes": approved_revenue_kes,
+        "work_type_breakdown": work_type_breakdown,
+        "turnaround": turnaround,
+        "send_back_rate": send_back_rate,
+        "proposals": proposals_list,
+        "recent_activity": recent_activity
+    })
+
+
+@app.route('/api/search', methods=['GET'])
+def search():
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify([])
+    like = f"%{q}%"
+    results = {}
+
+    for eng in db_session.query(Engagement).join(Client).filter(Client.name.ilike(like)).all():
+        results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": eng.status, "match": "Client name", "preview": None}
+
+    for b in db_session.query(Brief).filter(Brief.rendered_markdown.ilike(like)).all():
+        if b.engagement_id not in results:
+            eng = db_session.query(Engagement).get(b.engagement_id)
+            if eng:
+                data = b.structured_json or {}
+                work_type = (data.get('work_type') or '').replace('-', ' ').replace('_', ' ')
+                objective = (data.get('objectives') or [None])[0]
+                preview = ' · '.join(p for p in [work_type.title() if work_type else None, _snippet(objective, 70) if objective else None] if p)
+                results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": eng.status, "match": "Production brief", "preview": preview or None}
+
+    # Match on rendered markdown OR the pricing line items directly (pricing predates the
+    # markdown including a pricing table, and JSON columns don't reliably ilike() on their own).
+    proposal_matches = db_session.query(Proposal).filter(
+        Proposal.rendered_markdown.ilike(like) | cast(Proposal.pricing_line_items, String).ilike(like)
+    ).all()
+    for p in proposal_matches:
+        if p.engagement_id not in results:
+            eng = db_session.query(Engagement).get(p.engagement_id)
+            if eng:
+                # The match may be on an older revision's text — always summarize the
+                # engagement's *current* proposal, not whichever version matched.
+                latest = db_session.query(Proposal).filter_by(engagement_id=p.engagement_id) \
+                    .order_by(Proposal.version.desc()).first()
+                total = _format_kes(_line_item_total(latest.pricing_line_items))
+                approach = _snippet((latest.structured_json or {}).get('approach'), 70)
+                preview = ' · '.join(x for x in [total, approach] if x)
+                results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": latest.status, "match": "Client proposal", "preview": preview or None}
+
+    return jsonify(list(results.values())[:10])
+
 
 # ---------------------------------------------------------------------------
 # PDF Generation Helpers

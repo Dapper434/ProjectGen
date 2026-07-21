@@ -320,7 +320,9 @@ export default function EngagementDetail() {
         
         {/* Left Column: Actions / Status */}
         <div className="lg:col-span-1 space-y-6">
-          {(engagement.status === 'awaiting_transcript' || engagement.status === 'awaiting_review_transcript') && (
+          {/* brief_ready must offer the upload box too — it's how the review transcript
+              (Agent 2's input) gets in; the backend accepts it in that state. */}
+          {(engagement.status === 'awaiting_transcript' || engagement.status === 'awaiting_review_transcript' || engagement.status === 'brief_ready') && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
               <h2 className="text-sm font-medium text-white mb-3 flex items-center gap-2">
                 <UploadCloud size={16} className="text-indigo-400" />
