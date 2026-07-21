@@ -179,7 +179,7 @@ def upload_transcript(eng_id):
     if not eng:
         return jsonify({"error": "Engagement not found"}), 404
 
-    from agents import generate_brief, render_brief_markdown
+    from agents import generate_brief
 
     if eng.status == 'awaiting_transcript':
         # Agent 1 Flow
@@ -189,7 +189,7 @@ def upload_transcript(eng_id):
 
         try:
             brief_json = generate_brief(raw_text, eng.client.name)
-            brief_md = render_brief_markdown(brief_json)
+            brief_md = brief_json.get('rendered_markdown', '')
             
             brief = Brief(
                 engagement_id=eng_id,
@@ -230,14 +230,15 @@ def upload_transcript(eng_id):
             return jsonify({"error": "No brief found for this engagement"}), 400
 
         from models import PastProject, RateCardItem
-        from agents import generate_proposal, render_proposal_markdown
+        from agents import generate_proposal
 
         past_projects = db_session.query(PastProject).limit(3).all()
         rate_card = db_session.query(RateCardItem).all()
 
         try:
             proposal_json = generate_proposal(raw_text, brief, eng.client.name, past_projects, rate_card)
-            proposal_md = render_proposal_markdown(proposal_json, eng.client.name)
+            proposal_md = proposal_json.get('rendered_markdown', '')
+            extracted_signals = proposal_json.get('extracted_signals', '')
             
             proposal = Proposal(
                 engagement_id=eng_id,
@@ -251,7 +252,7 @@ def upload_transcript(eng_id):
             eng.status = 'proposal_ready'
             db_session.add(proposal)
             
-            # Create Agent Event
+            # Create Agent Event for Proposal Generation
             ev = AgentEvent(
                 engagement_id=eng_id,
                 agent='Proposal Generator',
@@ -261,6 +262,18 @@ def upload_transcript(eng_id):
                 tokens_used=0
             )
             db_session.add(ev)
+
+            # Create Agent Event for Extracted Signals (B1)
+            ev_signals = AgentEvent(
+                engagement_id=eng_id,
+                agent='Signal Extractor',
+                trigger='review_meeting_transcript_upload',
+                reasoning_summary=extracted_signals,
+                action='Extracted Meeting Signals',
+                tokens_used=0
+            )
+            db_session.add(ev_signals)
+            
             db_session.commit()
             
             return jsonify({"message": "Proposal generated successfully"})
@@ -307,7 +320,7 @@ def review_proposal(eng_id):
     elif action == 'send_back':
         # Re-run Agent 2 with notes
         from models import PastProject, RateCardItem
-        from agents import generate_proposal, render_proposal_markdown
+        from agents import generate_proposal
         
         brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
         transcript = db_session.query(Transcript).get(proposal.review_transcript_id)
@@ -317,7 +330,8 @@ def review_proposal(eng_id):
         
         try:
             proposal_json = generate_proposal(transcript.raw_text, brief, eng.client.name, past_projects, rate_card, additional_notes=notes)
-            proposal_md = render_proposal_markdown(proposal_json, eng.client.name)
+            proposal_md = proposal_json.get('rendered_markdown', '')
+            extracted_signals = proposal_json.get('extracted_signals', '')
             
             new_proposal = Proposal(
                 engagement_id=eng_id,
@@ -341,6 +355,17 @@ def review_proposal(eng_id):
                 tokens_used=0
             )
             db_session.add(ev)
+
+            ev_signals = AgentEvent(
+                engagement_id=eng_id,
+                agent='Signal Extractor',
+                trigger='manager_send_back',
+                reasoning_summary=extracted_signals,
+                action='Extracted Meeting Signals',
+                tokens_used=0
+            )
+            db_session.add(ev_signals)
+
             db_session.commit()
             
             return jsonify({"message": "Proposal regenerated with notes"})
