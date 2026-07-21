@@ -1,5 +1,5 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, LayoutDashboard, FileText, Settings } from 'lucide-react';
+import { LogOut, LayoutDashboard, BriefcaseBusiness } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 export default function Layout() {
@@ -34,7 +34,7 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50 flex">
       {/* Sidebar */}
-      <div className="w-64 border-r border-zinc-800 p-6 flex flex-col">
+      <aside className="w-64 shrink-0 min-h-screen border-r border-zinc-800 p-6 flex flex-col">
         <div className="flex items-center gap-2 mb-12">
           <div className="w-8 h-8 bg-indigo-600 rounded-sm flex items-center justify-center font-bold text-white tracking-tighter">
             F.OS
@@ -50,13 +50,13 @@ export default function Layout() {
             <LayoutDashboard size={18} />
             <span className="font-medium text-sm">Dashboard</span>
           </button>
-          
-          <button 
-            onClick={() => navigate('/rate-card')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${location.pathname === '/rate-card' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+
+          <button
+            onClick={() => navigate('/engagements')}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${location.pathname === '/engagements' || location.pathname.startsWith('/engagements/') ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
           >
-            <FileText size={18} />
-            <span className="font-medium text-sm">Rate Card</span>
+            <BriefcaseBusiness size={18} />
+            <span className="font-medium text-sm">Engagements</span>
           </button>
         </nav>
 
@@ -71,7 +71,7 @@ export default function Layout() {
             </button>
           </div>
         </div>
-      </div>
+      </aside>
       
       {/* Main Content */}
       <div className="flex-1 overflow-auto bg-zinc-950">

@@ -7,35 +7,24 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetch('http://localhost:5000/api/engagements', { credentials: 'include' })
-      .then(res => res.json())
-      .then(data => setEngagements(data))
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error('Unable to load dashboard data');
+        }
+        setEngagements(await response.json());
+      })
       .catch(err => console.error(err));
   }, []);
-
-  const handleNewEngagement = async () => {
-    try {
-      const res = await fetch('http://localhost:5000/api/engagements', { 
-        method: 'POST',
-        credentials: 'include' 
-      });
-      if (res.ok) {
-        const data = await res.json();
-        navigate(`/engagements/${data.id}`);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-2xl font-semibold text-white tracking-tight">Dashboard</h1>
+          <h1 className="text-2xl font-semibold text-white tracking-tight">Engagements</h1>
           <p className="text-zinc-400 mt-1">Manage your active client engagements</p>
         </div>
-        <button 
-          onClick={handleNewEngagement}
+        <button
+          onClick={() => navigate('/engagements/new')}
           className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm"
         >
           New Engagement

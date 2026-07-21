@@ -63,10 +63,15 @@ def me():
 @app.route('/api/engagements', methods=['GET', 'POST'])
 def engagements_list():
     if request.method == 'POST':
-        # Create a new engagement for the first client (for demo purposes)
-        client = db_session.query(Client).first()
+        data = request.get_json(silent=True) or {}
+        client_id = data.get('client_id')
+
+        if not isinstance(client_id, int):
+            return jsonify({"error": "A valid client_id is required"}), 400
+
+        client = db_session.get(Client, client_id)
         if not client:
-            return jsonify({"error": "No clients found"}), 400
+            return jsonify({"error": "Client not found"}), 404
         
         new_eng = Engagement(client_id=client.id, status='awaiting_transcript')
         db_session.add(new_eng)
@@ -83,6 +88,32 @@ def engagements_list():
             "status": eng.status
         })
     return jsonify(result)
+
+@app.route('/api/clients', methods=['GET', 'POST'])
+def clients_list():
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        name = (data.get('name') or '').strip()
+        industry = (data.get('industry') or '').strip()
+        notes = (data.get('notes') or '').strip()
+
+        if not name:
+            return jsonify({"error": "Company name is required"}), 400
+
+        existing_client = db_session.query(Client).filter(Client.name.ilike(name)).first()
+        if existing_client:
+            return jsonify({"error": "A company with that name already exists"}), 409
+
+        client = Client(name=name, industry=industry or None, notes=notes or None)
+        db_session.add(client)
+        db_session.commit()
+        return jsonify({"id": client.id, "name": client.name}), 201
+
+    clients = db_session.query(Client).order_by(Client.name.asc()).all()
+    return jsonify([
+        {"id": client.id, "name": client.name}
+        for client in clients
+    ])
 
 @app.route('/api/engagements/<int:eng_id>', methods=['GET'])
 def get_engagement(eng_id):
