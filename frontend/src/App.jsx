@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import EngagementDetail from './pages/EngagementDetail';
+import NewEngagement from './pages/NewEngagement';
 
 function App() {
   return (
@@ -12,7 +13,8 @@ function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
-          <Route path="rate-card" element={<div className="p-8 text-white">Rate Card Placeholder</div>} />
+          <Route path="engagements" element={<Dashboard />} />
+          <Route path="engagements/new" element={<NewEngagement />} />
           <Route path="engagements/:id" element={<EngagementDetail />} />
         </Route>
       </Routes>
