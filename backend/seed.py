@@ -1,12 +1,13 @@
 import json
 from database import init_db, db_session
-from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject
+from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
 from werkzeug.security import generate_password_hash
 
 def seed_db():
     init_db()
 
     # Clear existing data just in case
+    db_session.query(AgentEvent).delete()
     db_session.query(User).delete()
     db_session.query(Proposal).delete()
     db_session.query(Brief).delete()
