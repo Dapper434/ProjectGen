@@ -1,22 +1,39 @@
+# Regenerated from the actual dev venv (pip freeze) — this previously listed
+# Flask-SQLAlchemy (never used; the app talks to SQLAlchemy directly via database.py)
+# and was missing weasyprint entirely, so `pip install -r requirements.txt` alone
+# could not have produced a working install.
 annotated-types==0.7.0
 blinker==1.9.0
+brotli==1.2.0
 certifi==2026.6.17
+cffi==2.1.0
 charset-normalizer==3.4.9
 click==8.4.2
+cssselect2==0.9.0
 Flask==3.1.3
 flask-cors==6.0.5
-Flask-SQLAlchemy==3.1.1
+fonttools==4.63.0
 greenlet==3.5.3
 idna==3.18
 itsdangerous==2.2.0
 Jinja2==3.1.6
+Markdown==3.10.2
 MarkupSafe==3.0.3
+pillow==12.3.0
+pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
+pydyf==0.12.1
+pyphen==0.17.2
 python-dotenv==1.2.2
 requests==2.34.2
 SQLAlchemy==2.0.51
+tinycss2==1.5.1
+tinyhtml5==2.1.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
+weasyprint==69.0
+webencodings==0.5.1
 Werkzeug==3.1.8
+zopfli==0.4.3

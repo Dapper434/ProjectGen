@@ -6,8 +6,8 @@ from typing import List
 from models import Brief, Proposal, AgentEvent, PastProject, RateCardItem
 from database import db_session
 
-NIM_API_KEY = os.environ.get("NIM_API_KEY", "")
-NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+NIM_API_KEY = os.environ.get("NIM_API_KEY", "")  # blank is meaningful here — it's the "not configured" signal
+NIM_MODEL = os.environ.get("NIM_MODEL") or "meta/llama-3.1-70b-instruct"
 
 class ProductionBriefSchema(BaseModel):
     client: str
@@ -50,10 +50,21 @@ def call_nim_api(system_prompt: str, user_prompt: str) -> str:
         "max_tokens": 4096,
     }
     
-    response = requests.post(url, headers=headers, json=payload)
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
     response.raise_for_status()
     data = response.json()
     return data['choices'][0]['message']['content']
+
+
+def _extract_json(raw_response: str) -> dict:
+    """Strip an optional ```json / ``` code fence (robust to surrounding whitespace) and parse."""
+    text = raw_response.strip()
+    if text.startswith("```"):
+        text = text[3:]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.rsplit("```", 1)[0]
+    return json.loads(text.strip())
 
 def render_brief_markdown(brief_json: dict) -> str:
     return f"""# Production Brief: {brief_json.get('client', 'Unknown Client')}
@@ -122,31 +133,19 @@ Output JSON Schema:
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        
-        # Strip potential markdown code blocks
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:-3]
-        elif raw_response.startswith("```"):
-            raw_response = raw_response[3:-3]
-            
-        parsed_json = json.loads(raw_response)
-        
+        parsed_json = _extract_json(raw_response)
+
         # Validate schema
         ProductionBriefSchema(**parsed_json)
         return parsed_json
-        
-    except (ValidationError, json.JSONDecodeError) as e:
-        print(f"Agent validation failed: {e}. Retrying...")
+
+    except (ValidationError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
+        print(f"Agent call/validation failed: {e}. Retrying...")
         try:
             # Retry once
             retry_prompt = user_prompt + f"\n\nPREVIOUS ERROR (Fix this in your new JSON response):\n{str(e)}"
             raw_response = call_nim_api(system_prompt, retry_prompt)
-            if raw_response.startswith("```json"):
-                raw_response = raw_response[7:-3]
-            elif raw_response.startswith("```"):
-                raw_response = raw_response[3:-3]
-            
-            parsed_json = json.loads(raw_response)
+            parsed_json = _extract_json(raw_response)
             ProductionBriefSchema(**parsed_json)
             return parsed_json
         except Exception as retry_e:
@@ -165,6 +164,28 @@ Output JSON Schema:
             }
 
 def render_proposal_markdown(proposal_json: dict, client_name: str) -> str:
+    pricing_items = proposal_json.get('pricing', []) or []
+    if pricing_items:
+        rows = []
+        grand_total = 0
+        for item in pricing_items:
+            qty = item.get('qty', 1) or 1
+            rate = item.get('rate_kes', 0) or 0
+            line_total = qty * rate
+            grand_total += line_total
+            rows.append(
+                f"| {item.get('category', '')} | {item.get('description', '')} | {qty} | "
+                f"KES {rate:,} | KES {line_total:,} |"
+            )
+        pricing_section = f"""## Pricing Structure
+| Category | Description | Qty | Rate (KES) | Total (KES) |
+|---|---|---|---|---|
+{chr(10).join(rows)}
+| | | | **Total Investment** | **KES {grand_total:,}** |
+"""
+    else:
+        pricing_section = "## Pricing Structure\nNo pricing line items yet.\n"
+
     return f"""# Proposal: {client_name}
 
 ## Approach
@@ -181,7 +202,8 @@ This proposal reflects the updated scope as discussed in the review meeting.
 
 ## Team Shape
 {chr(10).join(f"- {t}" for t in proposal_json.get('team_shape', []))}
-"""
+
+{pricing_section}"""
 
 def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], additional_notes: str = "") -> dict:
     system_prompt = f"""You are the Proposal Generator Agent for GDF Kenya.
@@ -234,25 +256,15 @@ Output JSON Schema:
             }
 
         raw_response = call_nim_api(system_prompt, user_prompt)
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:-3]
-        elif raw_response.startswith("```"):
-            raw_response = raw_response[3:-3]
-            
-        parsed_json = json.loads(raw_response)
+        parsed_json = _extract_json(raw_response)
         ProposalSchema(**parsed_json)
         return parsed_json
-    except (ValidationError, json.JSONDecodeError) as e:
-        print(f"Agent validation failed: {e}. Retrying...")
+    except (ValidationError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
+        print(f"Agent call/validation failed: {e}. Retrying...")
         try:
             retry_prompt = user_prompt + f"\n\nPREVIOUS ERROR (Fix this in your new JSON response):\n{str(e)}"
             raw_response = call_nim_api(system_prompt, retry_prompt)
-            if raw_response.startswith("```json"):
-                raw_response = raw_response[7:-3]
-            elif raw_response.startswith("```"):
-                raw_response = raw_response[3:-3]
-            
-            parsed_json = json.loads(raw_response)
+            parsed_json = _extract_json(raw_response)
             ProposalSchema(**parsed_json)
             return parsed_json
         except Exception as retry_e:

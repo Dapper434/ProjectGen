@@ -1,6 +1,7 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, LayoutDashboard, BriefcaseBusiness } from 'lucide-react';
+import { LogOut, LayoutDashboard, BriefcaseBusiness, BarChart3 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import SearchBar from './SearchBar';
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -58,6 +59,7 @@ export default function Layout() {
             <BriefcaseBusiness size={18} />
             <span className="font-medium text-sm">Engagements</span>
           </button>
+
         </nav>
 
         <div className="mt-auto border-t border-zinc-800 pt-6">
@@ -75,6 +77,9 @@ export default function Layout() {
       
       {/* Main Content */}
       <div className="flex-1 overflow-auto bg-zinc-950">
+        <div className="sticky top-0 z-10 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-8 py-3">
+          <SearchBar />
+        </div>
         <Outlet context={{ user }} />
       </div>
     </div>
