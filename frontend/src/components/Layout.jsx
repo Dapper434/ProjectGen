@@ -71,9 +71,9 @@ export default function Layout() {
         <div className="px-5 pt-6 pb-5">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: 'linear-gradient(135deg, #c9971f, #a67a17)', boxShadow: '0 0 12px rgba(201,151,31,0.4)' }}>
-              <span className="text-white font-bold text-xs tracking-tight">F.OS</span>
+              <span className="text-white font-bold text-xs tracking-tight">EX</span>
             </div>
-            <span className="text-[#f7f5ef] font-semibold text-[15px] tracking-tight">FactoryOS</span>
+            <span className="text-[#f7f5ef] font-semibold text-[15px] tracking-tight">The Exodus</span>
           </div>
         </div>
 

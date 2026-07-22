@@ -253,7 +253,7 @@ export default function ProductionPlan() {
           <Sparkles size={11} className="text-[#a78bfa]" />
         </div>
         <p className="text-[10px] text-[#6e6e67] font-mono">
-          Assembled by FactoryOS · Resource Planner · Matched against {plan.team.length + plan.unfilled.length} proposal roles — review assignments before booking crew
+          Assembled by The Exodus · Resource Planner · Matched against {plan.team.length + plan.unfilled.length} proposal roles — review assignments before booking crew
         </p>
       </div>
     </div>

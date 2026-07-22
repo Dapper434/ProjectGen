@@ -73,7 +73,7 @@ export default function Login() {
               <Zap size={18} className="text-white" fill="white" />
             </div>
             <div>
-              <span className="font-serif text-[#f7f5ef] text-xl tracking-tight">FactoryOS</span>
+              <span className="font-serif text-[#f7f5ef] text-xl tracking-tight">The Exodus</span>
               <p className="text-[10px] font-mono text-[#6e6e67] uppercase tracking-widest">by GDF Kenya</p>
             </div>
           </div>
@@ -85,7 +85,7 @@ export default function Login() {
               into <span className="text-[#e8c34a]">change.</span>
             </h1>
             <p className="text-[#a3a39c] text-sm leading-relaxed max-w-xs">
-              Upload a meeting transcript. In seconds, FactoryOS produces structured briefs and client proposals — ready for human review.
+              Upload a meeting transcript. In seconds, The Exodus produces structured briefs and client proposals — ready for human review.
             </p>
           </div>
 
@@ -132,7 +132,7 @@ export default function Login() {
             <div className="w-8 h-8 rounded-lg bg-[#c9971f] flex items-center justify-center">
               <Zap size={15} className="text-white" fill="white" />
             </div>
-            <span className="font-serif text-[#f7f5ef] text-lg">FactoryOS</span>
+            <span className="font-serif text-[#f7f5ef] text-lg">The Exodus</span>
           </div>
 
           <div className="mb-8">

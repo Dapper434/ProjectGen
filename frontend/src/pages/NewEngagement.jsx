@@ -112,13 +112,13 @@ export default function NewEngagement() {
           </div>
         </div>
 
-        {/* FactoryOS info banner */}
+        {/* The Exodus info banner */}
         <div className="flex items-start gap-3 p-4 rounded-xl bg-[#c9971f]/10 border border-[#c9971f]/20">
           <div className="w-7 h-7 rounded-lg bg-[#c9971f]/20 flex items-center justify-center shrink-0 mt-0.5">
             <Zap size={13} className="text-[#e8c34a]" />
           </div>
           <div>
-            <p className="text-xs font-semibold text-[#e8c34a] mb-1">FactoryOS will stand by</p>
+            <p className="text-xs font-semibold text-[#e8c34a] mb-1">The Exodus will stand by</p>
             <p className="text-xs text-[#a3a39c] leading-relaxed">
               Once created, the Producer uploads the first meeting transcript to generate a Production Brief. After a brief review meeting, the second transcript generates the full Client Proposal — ready for Account Manager approval.
             </p>

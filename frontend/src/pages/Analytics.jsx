@@ -94,7 +94,7 @@ export default function Analytics() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-[#f7f5ef] text-2xl font-semibold mb-1">Agency Pulse</h1>
-        <p className="text-[13px] text-[#8a8a83]">How work is moving through FactoryOS, agency-wide</p>
+        <p className="text-[13px] text-[#8a8a83]">How work is moving through The Exodus, agency-wide</p>
       </div>
 
       {/* KPI cards */}

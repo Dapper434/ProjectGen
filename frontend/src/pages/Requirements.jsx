@@ -93,7 +93,7 @@ export default function Requirements() {
           <h1 className="font-serif text-[#f7f5ef] text-2xl">Requirements</h1>
         </div>
         <p className="text-sm text-[#a3a39c]">
-          Authoritative documents describing what a complete brief or proposal must contain. FactoryOS checks generated documents against these and flags what's missing.
+          Authoritative documents describing what a complete brief or proposal must contain. The Exodus checks generated documents against these and flags what's missing.
         </p>
       </div>
 
