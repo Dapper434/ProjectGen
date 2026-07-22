@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight, Layers, TrendingUp, Clock, HelpCircle, ArrowUpRight, Plus } from 'lucide-react';
 import { stageMeta, clientColor, formatId, timeAgo, formatKes } from '../lib/engagements';
 
-const API = 'http://localhost:5000/api';
+const API = '/api';
 
 export default function ClientDetail() {
   const { id } = useParams();

@@ -42,7 +42,7 @@ export default function SearchBar() {
     }
     setLoading(true);
     const handle = setTimeout(() => {
-      fetch(`http://localhost:5000/api/search?q=${encodeURIComponent(q)}`, { credentials: 'include' })
+      fetch(`/api/search?q=${encodeURIComponent(q)}`, { credentials: 'include' })
         .then((res) => (res.ok ? res.json() : []))
         .then((data) => {
           setResults(data);

@@ -3,7 +3,7 @@ import { useOutletContext } from 'react-router-dom';
 import { FileText, TrendingUp, Users, RotateCcw, Activity } from 'lucide-react';
 import { formatKes, timeAgo } from '../lib/engagements';
 
-const API = 'http://localhost:5000/api';
+const API = '/api';
 
 const AGENT_COLORS = {
   'Brief Generator': '#c9971f',

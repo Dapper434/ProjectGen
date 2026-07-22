@@ -25,11 +25,11 @@ export default function Dashboard() {
   const [analytics, setAnalytics] = useState(null);
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/engagements', { credentials: 'include' })
+    fetch('/api/engagements', { credentials: 'include' })
       .then(res => (res.ok ? res.json() : []))
       .then(setEngagements)
       .catch(err => console.error(err));
-    fetch('http://localhost:5000/api/analytics', { credentials: 'include' })
+    fetch('/api/analytics', { credentials: 'include' })
       .then(res => (res.ok ? res.json() : null))
       .then(setAnalytics)
       .catch(err => console.error(err));

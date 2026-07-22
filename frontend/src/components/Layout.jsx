@@ -1,11 +1,13 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Layers, BarChart3, LogOut, Plus } from 'lucide-react';
+import { LayoutDashboard, Layers, BarChart3, ClipboardCheck, Inbox, LogOut, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import SearchBar from './SearchBar';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/dashboard' },
   { icon: Layers, label: 'Engagements', to: '/engagements' },
+  { icon: Inbox, label: 'Inbox', to: '/inbox' },
+  { icon: ClipboardCheck, label: 'Requirements', to: '/requirements' },
 ];
 
 const adminNavItems = [
@@ -15,11 +17,28 @@ const adminNavItems = [
 export default function Layout() {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
+  const [inboxCount, setInboxCount] = useState(0);
+
+  // Pending Fathom transcripts badge — refreshed on a slow poll so a meeting
+  // that just ended surfaces without a manual reload.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    const fetchCount = async () => {
+      try {
+        const res = await fetch('/api/inbox?status=pending', { credentials: 'include' });
+        if (res.ok && !cancelled) setInboxCount((await res.json()).pending_count || 0);
+      } catch { /* backend down — badge just stays as-is */ }
+    };
+    fetchCount();
+    const timer = setInterval(fetchCount, 60000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [user]);
 
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const res = await fetch('http://localhost:5000/api/me', { credentials: 'include' });
+        const res = await fetch('/api/me', { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           setUser(data);
@@ -34,7 +53,7 @@ export default function Layout() {
   }, [navigate]);
 
   const handleLogout = async () => {
-    await fetch('http://localhost:5000/api/logout', { method: 'POST', credentials: 'include' });
+    await fetch('/api/logout', { method: 'POST', credentials: 'include' });
     navigate('/login');
   };
 
@@ -81,6 +100,11 @@ export default function Layout() {
                 <>
                   <Icon size={16} className={isActive ? 'text-[#e8c34a]' : 'text-[#5c5c55] group-hover:text-[#8a8a83]'} />
                   {label}
+                  {to === '/inbox' && inboxCount > 0 && (
+                    <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#c9971f]/20 text-[#e8c34a] border border-[#c9971f]/30">
+                      {inboxCount}
+                    </span>
+                  )}
                 </>
               )}
             </NavLink>

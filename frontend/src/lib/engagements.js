@@ -8,6 +8,7 @@ export const PIPELINE_STAGES = [
   'proposal_ready',
   'in_review',
   'approved',
+  'accepted',
 ];
 
 export const STAGE_META = {
@@ -17,6 +18,7 @@ export const STAGE_META = {
   proposal_ready:             { label: 'PROPOSAL READY',      color: '#0369a1', bg: 'rgba(14,165,233,0.12)' },
   in_review:                  { label: 'IN REVIEW',           color: '#c2410c', bg: 'rgba(249,115,22,0.12)' },
   approved:                   { label: 'APPROVED',            color: '#047857', bg: 'rgba(16,185,129,0.12)' },
+  accepted:                   { label: 'IN PRODUCTION',       color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
 };
 
 export const STAGE_FALLBACK = { label: 'UNKNOWN', color: '#64748b', bg: 'rgba(100,116,139,0.12)' };

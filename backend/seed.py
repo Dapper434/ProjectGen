@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import init_db, db_session
-from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
+from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent, Talent, StaffingPlan
 from werkzeug.security import generate_password_hash
+from seed_talents import TALENT_ROWS
 
 def seed_db():
     init_db()
@@ -22,7 +23,9 @@ def seed_db():
     db_session.query(Client).delete()
     db_session.query(RateCardItem).delete()
     db_session.query(PastProject).delete()
-    
+    db_session.query(StaffingPlan).delete()
+    db_session.query(Talent).delete()
+
     db_session.commit()
 
     # 1. Users (Demo purposes)
@@ -157,6 +160,9 @@ As discussed in the review meeting, posters have been removed in favor of a digi
         )
     ]
     db_session.add_all(projects)
+
+    # 7. Talent pool (Part 2 — production staffing); same rows as seed_talents.py
+    db_session.add_all([Talent(**row) for row in TALENT_ROWS])
 
     db_session.commit()
     print("Database seeded successfully.")
