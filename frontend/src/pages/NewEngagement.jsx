@@ -38,7 +38,7 @@ export default function NewEngagement() {
     try {
       setSaving(true);
       setError('');
-      const clientResponse = await fetch('http://localhost:5000/api/clients', {
+      const clientResponse = await fetch('/api/clients', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -54,7 +54,7 @@ export default function NewEngagement() {
         return;
       }
 
-      const engagementResponse = await fetch('http://localhost:5000/api/engagements', {
+      const engagementResponse = await fetch('/api/engagements', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },

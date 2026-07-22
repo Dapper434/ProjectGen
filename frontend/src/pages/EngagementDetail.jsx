@@ -4,10 +4,11 @@ import {
   ChevronRight, Upload, Zap, FileText, CheckCircle2, Clock,
   RotateCcw, Eye, Download, X, AlertCircle,
   Target, Users, Package, Calendar, Wallet, Briefcase, AlertTriangle, HelpCircle,
+  BookOpen, ChevronDown, Trash2,
 } from 'lucide-react';
 import { stageMeta, formatId, timeAgo } from '../lib/engagements';
 
-const API = 'http://localhost:5000/api';
+const API = '/api';
 
 // Stage 2's transcript box only opens once the producer explicitly advances past the
 // brief — brief_ready allows more intake transcripts (refining the brief) instead.
@@ -234,7 +235,16 @@ function buildStages(engagement) {
       title: 'Account Manager Review',
       subtitle: 'Review the generated proposal and approve, or ask the AI to revise it',
       docType: 'Approval',
-      status: status === 'approved' ? 'complete' : APPROVAL_STATUSES.includes(status) ? 'active' : 'pending',
+      status: ['approved', 'accepted'].includes(status) ? 'complete' : APPROVAL_STATUSES.includes(status) ? 'active' : 'pending',
+    },
+    {
+      id: 'production',
+      step: 4,
+      title: 'Client Acceptance & Team Assembly',
+      subtitle: 'Record the client\'s acceptance — FactoryOS assembles the crew, tools, and kickoff plan from the talent pool',
+      agent: 'Resource Planner',
+      docType: 'Production Plan',
+      status: status === 'accepted' ? 'complete' : status === 'approved' ? 'active' : 'pending',
     },
   ];
 }
@@ -268,6 +278,273 @@ function MeetingSummaryCard({ transcript }) {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+// Passive completeness badge — checks a generated brief/proposal against agency-
+// uploaded authoritative requirements (Requirements.jsx). Fetches lazily after the
+// engagement itself has already loaded, so it never blocks the main page render, and
+// polls only while a check is actually in flight. Never blocks any action — purely
+// informational.
+function CompletenessBadge({ engagementId, docType, refreshKey }) {
+  const [result, setResult] = useState(null);
+  const pollRef = useRef(null);
+
+  const fetchOnce = useCallback(async (force) => {
+    try {
+      const url = `${API}/engagements/${engagementId}/${docType}/completeness${force ? '?refresh=1' : ''}`;
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setResult(data);
+      if (data.pending) {
+        if (!pollRef.current) {
+          pollRef.current = setInterval(async () => {
+            const r2 = await fetch(`${API}/engagements/${engagementId}/${docType}/completeness`, { credentials: 'include' });
+            if (r2.ok) {
+              const d2 = await r2.json();
+              setResult(d2);
+              if (!d2.pending) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+            }
+          }, 2000);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, [engagementId, docType]);
+
+  useEffect(() => {
+    fetchOnce(false);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engagementId, docType, refreshKey]);
+
+  if (!result || !result.available) return null;
+
+  if (result.pending) {
+    return (
+      <div className="flex items-center gap-2 mt-2 text-[10px] text-[#6e6e67]">
+        <div className="w-3 h-3 rounded-full border-2 border-[#c9971f]/30 border-t-[#c9971f] animate-spin" />
+        Checking against requirements…
+      </div>
+    );
+  }
+
+  if (result.complete === null) {
+    return <p className="mt-2 text-[10px] text-[#6e6e67]">Completeness check unavailable.</p>;
+  }
+
+  const isComplete = result.complete;
+  return (
+    <div className={`mt-2 p-2.5 rounded-lg border text-[11px] ${isComplete ? 'bg-[#10b981]/10 border-[#10b981]/20 text-[#10b981]' : 'bg-[#f59e0b]/10 border-[#f59e0b]/20 text-[#b45309]'}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium">
+          {isComplete ? '✓ Meets known requirements' : `⚠ ${result.missing.length} item${result.missing.length === 1 ? '' : 's'} may be missing`}
+          {result.stale && <span className="text-[#6e6e67] font-normal"> · requirements changed since this check</span>}
+        </span>
+        <button onClick={() => fetchOnce(true)} className="text-[10px] underline decoration-dotted text-[#6e6e67] hover:text-[#a3a39c] shrink-0">
+          Recheck
+        </button>
+      </div>
+      {!isComplete && result.missing.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5 list-disc list-inside text-[#a16207]">
+          {result.missing.map((item, i) => <li key={i}>{item}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const REF_PURPOSES = [
+  { id: 'structure', label: 'Structure / template' },
+  { id: 'content', label: 'Content / background' },
+];
+const REF_PURPOSE_LABEL = Object.fromEntries(REF_PURPOSES.map(p => [p.id, p.label]));
+
+// The "any reference documents?" ask — optional engagement-scoped material (proposal
+// templates, client RFPs, brand guidelines) fed into the generation prompts to shape
+// structure and enrich content. Auto-expanded while the engagement is waiting on a
+// transcript (the moment references still influence the next generation); generation
+// runs identically when none are uploaded.
+function ReferenceDocumentsCard({ engagementId, status }) {
+  const [docs, setDocs] = useState(null);
+  const [open, setOpen] = useState(status === 'awaiting_transcript' || REVIEW_UPLOAD_STATUSES.includes(status));
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState('');
+  const [purpose, setPurpose] = useState('structure');
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const fetchDocs = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/engagements/${engagementId}/references`, { credentials: 'include' });
+      if (res.ok) setDocs(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  }, [engagementId]);
+
+  useEffect(() => { fetchDocs(); }, [fetchDocs]);
+
+  const readFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setText(String(reader.result || ''));
+    reader.readAsText(file);
+  };
+
+  const handleAdd = async () => {
+    if (!title.trim() || !text.trim()) {
+      setError('A title and the document text are both required.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch(`${API}/engagements/${engagementId}/references`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title.trim(), purpose, raw_text: text }),
+        credentials: 'include',
+      });
+      if (res.ok) {
+        setTitle('');
+        setText('');
+        setShowForm(false);
+        await fetchDocs();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setError(err.error || 'Upload failed.');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Connection failed. Is the backend running?');
+    }
+    setSaving(false);
+  };
+
+  const handleRemove = async (docId) => {
+    try {
+      const res = await fetch(`${API}/references/${docId}/deactivate`, { method: 'POST', credentials: 'include' });
+      if (res.ok) await fetchDocs();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const count = docs?.length ?? 0;
+
+  return (
+    <div className="mb-6 rounded-xl" style={{ background: '#141414', border: '1px solid #242424' }}>
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-2 px-5 py-3.5 text-left">
+        <BookOpen size={14} className="text-[#8a8a83]" />
+        <span className="text-[14px] font-semibold text-[#f2f0e8]">Reference Documents</span>
+        <span className="text-[10px] font-mono text-[#6e6e67]">{count > 0 ? `${count} on file` : 'optional'}</span>
+        <ChevronDown size={14} className={`ml-auto text-[#6e6e67] transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="px-5 pb-4" style={{ borderTop: '1px solid #242424' }}>
+          <p className="text-[11px] text-[#6e6e67] leading-relaxed pt-3 mb-3">
+            Have a proposal template, the client's RFP, or brand guidelines? FactoryOS uses them to shape structure
+            and enrich content when generating documents — add them before generating for best results.
+          </p>
+
+          {count > 0 && (
+            <div className="flex flex-col mb-3">
+              {docs.map(d => (
+                <div key={d.id} className="flex items-center gap-3 py-2" style={{ borderBottom: '1px solid #191919' }}>
+                  <FileText size={13} className="text-[#6e6e67] shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] font-medium text-[#d6d4c9] truncate">{d.title}</p>
+                    <p className="text-[10px] text-[#5c5c55] font-mono">
+                      {REF_PURPOSE_LABEL[d.purpose] || d.purpose} · {d.length.toLocaleString()} chars · {timeAgo(d.uploaded_at)}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleRemove(d.id)}
+                    title="Remove this reference"
+                    className="w-7 h-7 rounded-md border border-[#262626] flex items-center justify-center text-[#6e6e67] hover:text-rose-500 hover:border-rose-500/40 transition-colors shrink-0"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showForm ? (
+            <div className="flex flex-col gap-3 p-3 rounded-lg bg-[#0e0e0e] border border-[#262626]">
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                  placeholder="Title, e.g. Client RFP"
+                  className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-xs text-[#f7f5ef] placeholder:text-[#6e6e67] focus:outline-none focus:border-[#c9971f]/60 transition-colors"
+                />
+                <select
+                  value={purpose}
+                  onChange={e => setPurpose(e.target.value)}
+                  className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-xs text-[#f7f5ef] focus:outline-none focus:border-[#c9971f]/60 transition-colors"
+                >
+                  {REF_PURPOSES.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              </div>
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={e => { e.preventDefault(); setDragging(false); readFile(e.dataTransfer.files?.[0]); }}
+                className={`border-2 border-dashed rounded-lg p-3 text-center transition-all cursor-pointer ${
+                  dragging ? 'border-[#c9971f]/60 bg-[#c9971f]/10' : 'border-[#262626] hover:border-[#333333]'
+                }`}
+              >
+                <p className="text-[11px] text-[#a3a39c]">Drop a .txt/.md file here, or <span className="text-[#c9971f]">browse</span></p>
+                <input ref={fileInputRef} type="file" accept=".txt,.md,text/plain,text/markdown" className="hidden" onChange={e => readFile(e.target.files?.[0])} />
+              </div>
+              <textarea
+                rows={4}
+                value={text}
+                onChange={e => setText(e.target.value)}
+                placeholder="Or paste the document text here…"
+                className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-xs text-[#f7f5ef] placeholder:text-[#6e6e67] focus:outline-none focus:border-[#c9971f]/50 resize-none font-mono"
+              />
+              {error && <p role="alert" className="text-xs text-rose-500">{error}</p>}
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => { setShowForm(false); setError(''); }}
+                  className="px-3 py-1.5 rounded-lg border border-[#262626] text-xs text-[#a3a39c] hover:border-[#333333] hover:text-[#f7f5ef] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAdd}
+                  disabled={saving}
+                  className="px-4 py-1.5 rounded-lg bg-[#c9971f] hover:bg-[#a67a17] text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
+                >
+                  {saving ? 'Adding…' : 'Add Document'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowForm(true)}
+              className="w-full py-2 rounded-lg border border-dashed border-[#262626] text-xs text-[#a3a39c] hover:border-[#c9971f]/40 hover:text-[#e8c34a] transition-colors"
+            >
+              + Add Reference Document
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -367,6 +644,10 @@ export default function EngagementDetail() {
   const [isAdvancing, setIsAdvancing] = useState(false);
   const [advanceError, setAdvanceError] = useState('');
   const [isStartingNextRound, setIsStartingNextRound] = useState(false);
+
+  const [isAccepting, setIsAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState('');
+  const canAccept = ['Account Manager', 'Admin'].includes(user?.role);
 
   const pollRef = useRef(null);
 
@@ -569,6 +850,30 @@ export default function EngagementDetail() {
     setIsRevising(false);
   };
 
+  // Part 2 mock: recording the client's acceptance triggers the Resource Planner,
+  // which matches the proposal's team shape against the seeded talent pool — a
+  // deterministic DB match, not an LLM call, so it lands instantly.
+  const handleAccept = async () => {
+    setIsAccepting(true);
+    setAcceptError('');
+    try {
+      const res = await fetch(`${API}/engagements/${id}/accept`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        navigate(`/engagements/${id}/production`);
+        return;
+      }
+      const err = await res.json().catch(() => ({}));
+      setAcceptError(err.error || 'Could not record the acceptance.');
+    } catch (err) {
+      console.error(err);
+      setAcceptError('Connection failed. Is the backend running?');
+    }
+    setIsAccepting(false);
+  };
+
   const proposalApproved = engagement?.proposal?.status === 'approved';
 
   const downloadPDF = async (doc) => {
@@ -652,6 +957,8 @@ export default function EngagementDetail() {
           )}
         </div>
 
+        <ReferenceDocumentsCard engagementId={engagement.id} status={engagement.status} />
+
         {/* Pipeline */}
         <div className="flex flex-col gap-4">
           {stages.map((stage, i) => (
@@ -705,7 +1012,7 @@ export default function EngagementDetail() {
                 </div>
 
                 {/* Stage body — brief & proposal steps */}
-                {stage.status !== 'pending' && stage.id !== 'approval' && (
+                {stage.status !== 'pending' && stage.id !== 'approval' && stage.id !== 'production' && (
                   <div className="px-5 pb-5 border-t border-[#262626] pt-4">
                     {stage.status === 'complete' ? (
                       <div>
@@ -739,6 +1046,8 @@ export default function EngagementDetail() {
                             {isDownloading === stage.id ? 'Preparing…' : 'Download'}
                           </button>
                         </div>
+
+                        <CompletenessBadge engagementId={engagement.id} docType={stage.id} refreshKey={stage.id === 'brief' ? engagement.brief?.id : engagement.proposal?.id} />
 
                         {/* A brief stays refinable — more than one intake meeting is
                             common — until the producer explicitly moves on. */}
@@ -850,6 +1159,54 @@ export default function EngagementDetail() {
                             {isRevising ? 'AI Revising…' : 'Ask AI to Revise'}
                           </button>
                         </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Production kickoff stage body (Part 2) */}
+                {stage.id === 'production' && stage.status !== 'pending' && (
+                  <div className="px-5 pb-5 border-t border-[#262626] pt-4">
+                    {stage.status === 'complete' ? (
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1 flex items-center gap-3 p-4 rounded-lg bg-[#7c3aed]/10 border border-[#7c3aed]/20">
+                          <CheckCircle2 size={18} className="text-[#a78bfa] shrink-0" />
+                          <div>
+                            <p className="text-sm font-medium text-[#a78bfa]">Client Accepted — Crew Assembled</p>
+                            <p className="text-xs text-[#6e6e67]">The Resource Planner matched the proposal's team shape against the talent pool.</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => navigate(`/engagements/${id}/production`)}
+                          className="flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium text-[#a78bfa] border border-[#7c3aed]/40 rounded-lg hover:bg-[#7c3aed]/10 transition-colors shrink-0"
+                        >
+                          <Users size={13} />
+                          View Production Plan →
+                        </button>
+                      </div>
+                    ) : !canAccept ? (
+                      <div className="flex items-start gap-3 p-3 rounded-lg bg-[#7c3aed]/10 border border-[#7c3aed]/20">
+                        <AlertCircle size={14} className="text-[#a78bfa] shrink-0 mt-0.5" />
+                        <p className="text-xs text-[#a78bfa]">Waiting on the client's decision. Once they accept, the Account Manager records it here and FactoryOS assembles the production team.</p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-start gap-3 p-3 rounded-lg bg-[#7c3aed]/10 border border-[#7c3aed]/20">
+                          <AlertCircle size={14} className="text-[#a78bfa] shrink-0 mt-0.5" />
+                          <p className="text-xs text-[#a78bfa]">
+                            Proposal sent — when the client confirms, mark it accepted. FactoryOS will match the
+                            proposed team shape against the talent pool and pull together tools and a kickoff plan.
+                          </p>
+                        </div>
+                        {acceptError && <p role="alert" className="text-xs text-rose-600">{acceptError}</p>}
+                        <button
+                          onClick={handleAccept}
+                          disabled={isAccepting}
+                          className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-sm font-medium transition-colors disabled:cursor-wait disabled:opacity-60"
+                        >
+                          <Users size={14} />
+                          {isAccepting ? 'Assembling Team…' : 'Mark as Client-Accepted & Assemble Team'}
+                        </button>
                       </div>
                     )}
                   </div>

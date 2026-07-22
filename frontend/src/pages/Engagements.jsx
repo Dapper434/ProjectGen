@@ -76,7 +76,7 @@ export default function Engagements() {
   const [engagements, setEngagements] = useState([]);
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/engagements', { credentials: 'include' })
+    fetch('/api/engagements', { credentials: 'include' })
       .then(res => (res.ok ? res.json() : []))
       .then(data => setEngagements([...data].sort((a, b) => b.id - a.id)))
       .catch(err => console.error(err));

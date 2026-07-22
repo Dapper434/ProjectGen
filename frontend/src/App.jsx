@@ -7,6 +7,9 @@ import EngagementDetail from './pages/EngagementDetail';
 import NewEngagement from './pages/NewEngagement';
 import ClientDetail from './pages/ClientDetail';
 import Analytics from './pages/Analytics';
+import Requirements from './pages/Requirements';
+import Inbox from './pages/Inbox';
+import ProductionPlan from './pages/ProductionPlan';
 
 function App() {
   return (
@@ -19,8 +22,11 @@ function App() {
           <Route path="engagements" element={<Engagements />} />
           <Route path="engagements/new" element={<NewEngagement />} />
           <Route path="engagements/:id" element={<EngagementDetail />} />
+          <Route path="engagements/:id/production" element={<ProductionPlan />} />
           <Route path="clients/:id" element={<ClientDetail />} />
           <Route path="analytics" element={<Analytics />} />
+          <Route path="requirements" element={<Requirements />} />
+          <Route path="inbox" element={<Inbox />} />
         </Route>
       </Routes>
     </BrowserRouter>

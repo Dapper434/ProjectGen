@@ -29,6 +29,8 @@ COLUMNS = [
     ('transcripts',  'duration_minutes',  'INTEGER',  None),
     ('transcripts',  'attendees',         'TEXT',     None),
     ('transcripts',  'summary',           'TEXT',     None),
+    ('briefs',       'completeness',      'TEXT',     None),
+    ('proposals',    'completeness',      'TEXT',     None),
 ]
 
 
@@ -37,7 +39,20 @@ def existing_columns(cur, table):
     return {row[1] for row in cur.fetchall()}
 
 
+def create_new_tables():
+    """Base.metadata.create_all() only creates *missing* tables — safe to run against
+    the live DB, it won't touch existing ones. Runs (and its SQLAlchemy engine
+    connection fully closes) before the raw sqlite3 connection below opens, so the
+    two never hold the file open concurrently."""
+    from database import Base, engine
+    import models  # noqa: F401 — registers models on Base.metadata
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+
 def main():
+    create_new_tables()
+
     print(f"Migrating {DB_PATH} ...")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()

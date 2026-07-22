@@ -8,9 +8,9 @@ load_dotenv()
 from flask import Flask, request, jsonify, session, send_file
 from flask_cors import CORS
 from database import db_session, init_db
-from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent
+from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent, RequirementDocument, ReferenceDocument, InboundTranscript, Talent, StaffingPlan
 from werkzeug.security import check_password_hash
-from sqlalchemy import cast, String
+from sqlalchemy import cast, String, func
 from weasyprint import HTML
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -20,6 +20,12 @@ from datetime import datetime
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY') or 'super-secret-demo-key'
 CORS(app, supports_credentials=True)
+
+# Production runs behind HTTPS everywhere (Vercel rewrite -> Tailscale Funnel),
+# and the Vercel proxy makes all browser traffic same-origin — so Lax + Secure
+# is enough; no cross-site cookie contortions needed. Off in dev (plain http).
+if os.environ.get('PRODUCTION') == '1':
+    app.config.update(SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE='Lax')
 
 @app.teardown_appcontext
 def shutdown_session(exception=None):
@@ -74,6 +80,17 @@ def _client_relationship_context(client_id, exclude_engagement_id):
     return chr(10).join(lines)
 
 
+def _reference_material_for(eng_id, query_text):
+    """Excerpt block from this engagement's active ReferenceDocuments (templates, RFPs,
+    background material) for feeding INTO generation prompts. Empty string when none
+    exist — generation proceeds identically without them."""
+    from rag import build_reference_context
+    docs = db_session.query(ReferenceDocument).filter_by(
+        engagement_id=eng_id, is_active=True
+    ).order_by(ReferenceDocument.id).all()
+    return build_reference_context(query_text, docs)
+
+
 def _fail_processing(eng_id, error):
     db_session.rollback()
     eng = db_session.query(Engagement).get(eng_id)
@@ -89,8 +106,9 @@ def _process_brief_generation(eng_id, transcript_id):
         eng = db_session.query(Engagement).get(eng_id)
         transcript = db_session.query(Transcript).get(transcript_id)
         client_history = _client_relationship_context(eng.client_id, exclude_engagement_id=eng_id)
+        reference_material = _reference_material_for(eng_id, transcript.raw_text)
 
-        brief_json = generate_brief(transcript.raw_text, eng.client.name, client_history=client_history)
+        brief_json = generate_brief(transcript.raw_text, eng.client.name, client_history=client_history, reference_material=reference_material)
         tokens = brief_json.pop('_tokens_used', 0)
 
         transcript.meeting_date = brief_json.get('meeting_date')
@@ -183,8 +201,9 @@ def _process_proposal_generation(eng_id, transcript_id):
         past_projects = db_session.query(PastProject).limit(3).all()
         rate_card = db_session.query(RateCardItem).all()
         client_history = _client_relationship_context(eng.client_id, exclude_engagement_id=eng_id)
+        reference_material = _reference_material_for(eng_id, f"{brief.rendered_markdown}\n\n{transcript.raw_text}")
 
-        proposal_json = generate_proposal(transcript.raw_text, brief, eng.client.name, past_projects, rate_card, client_history=client_history)
+        proposal_json = generate_proposal(transcript.raw_text, brief, eng.client.name, past_projects, rate_card, client_history=client_history, reference_material=reference_material)
         signal_tokens = proposal_json.pop('_signal_tokens_used', 0)
         proposal_tokens = proposal_json.pop('_proposal_tokens_used', 0)
         extracted_signals = proposal_json.get('extracted_signals', {})
@@ -270,6 +289,228 @@ def _process_proposal_revision(eng_id, proposal_id, notes):
         _fail_processing(eng_id, f"Agent failed on revision: {e}")
     finally:
         db_session.remove()
+
+
+def _transcript_dispatch_for(status):
+    """(transcript_kind, background_task) for a new transcript landing on an
+    engagement in `status`, or None if the state can't accept one.
+    awaiting_transcript: first client-meeting transcript, generates the brief.
+    brief_ready: a brief already exists but the producer hasn't yet moved to the
+      proposal stage — another client-meeting transcript here *refines* the brief
+      (multi-round intake) rather than jumping to the proposal.
+    awaiting_review_transcript: the producer explicitly advanced past the brief —
+      this transcript is the review meeting and generates the proposal."""
+    return {
+        'awaiting_transcript': ('client_meeting', _process_brief_generation),
+        'brief_ready': ('client_meeting', _process_brief_refinement),
+        'awaiting_review_transcript': ('brief_review_meeting', _process_proposal_generation),
+    }.get(status)
+
+
+# ---------------------------------------------------------------------------
+# Requirements completeness check (simple RAG)
+# ---------------------------------------------------------------------------
+
+COMPLETENESS_MODELS = {'brief': Brief, 'proposal': Proposal}
+
+
+def _requirement_docs_for(doc_type):
+    return db_session.query(RequirementDocument).filter(
+        RequirementDocument.is_active == True,  # noqa: E712
+        RequirementDocument.doc_type.in_([doc_type, 'general'])
+    ).all()
+
+
+def _requirement_fingerprint(doc_type):
+    q = db_session.query(func.count(RequirementDocument.id), func.max(RequirementDocument.id)).filter(
+        RequirementDocument.is_active == True,  # noqa: E712
+        RequirementDocument.doc_type.in_([doc_type, 'general'])
+    )
+    count, max_id = q.one()
+    return {"count": count or 0, "max_id": max_id or 0}
+
+
+def _process_completeness_check(doc_type, doc_id):
+    from rag import check_completeness
+    Model = COMPLETENESS_MODELS[doc_type]
+    try:
+        doc_row = db_session.query(Model).get(doc_id)
+        requirement_docs = _requirement_docs_for(doc_type)
+        result = check_completeness(doc_type, doc_row.rendered_markdown, requirement_docs)
+        doc_row.completeness = {
+            **result,
+            "pending": False,
+            "computed_at": datetime.now().isoformat(),
+            "doc_fingerprint": _requirement_fingerprint(doc_type),
+        }
+        db_session.commit()
+    except Exception as e:
+        db_session.rollback()
+        doc_row = db_session.query(Model).get(doc_id)
+        if doc_row:
+            doc_row.completeness = {
+                "pending": False, "complete": None, "missing": [],
+                "notes": f"Completeness check failed: {e}",
+                "computed_at": datetime.now().isoformat(),
+                "doc_fingerprint": _requirement_fingerprint(doc_type),
+            }
+            db_session.commit()
+    finally:
+        db_session.remove()
+
+
+def _completeness_response(eng_id, doc_type, force):
+    fingerprint = _requirement_fingerprint(doc_type)
+    if fingerprint['count'] == 0:
+        return jsonify({"available": False})
+
+    Model = COMPLETENESS_MODELS[doc_type]
+    doc_row = db_session.query(Model).filter_by(engagement_id=eng_id).order_by(Model.id.desc()).first()
+    if not doc_row:
+        return jsonify({"available": False})
+
+    cached = doc_row.completeness or {}
+
+    if cached.get('pending'):
+        return jsonify({"available": True, "pending": True})
+
+    has_result = 'computed_at' in cached
+    stale = has_result and cached.get('doc_fingerprint') != fingerprint
+
+    if has_result and not force and not stale:
+        return jsonify({"available": True, "pending": False, "stale": False, **{k: v for k, v in cached.items() if k != 'doc_fingerprint'}})
+
+    if has_result and not force and stale:
+        return jsonify({"available": True, "pending": False, "stale": True, **{k: v for k, v in cached.items() if k != 'doc_fingerprint'}})
+
+    # Never checked, or a forced/stale recheck was requested.
+    doc_row.completeness = {"pending": True}
+    db_session.commit()
+    _executor.submit(_process_completeness_check, doc_type, doc_row.id)
+    return jsonify({"available": True, "pending": True})
+
+
+@app.route('/api/engagements/<int:eng_id>/brief/completeness', methods=['GET'])
+def get_brief_completeness(eng_id):
+    return _completeness_response(eng_id, 'brief', request.args.get('refresh') == '1')
+
+
+@app.route('/api/engagements/<int:eng_id>/proposal/completeness', methods=['GET'])
+def get_proposal_completeness(eng_id):
+    return _completeness_response(eng_id, 'proposal', request.args.get('refresh') == '1')
+
+
+@app.route('/api/requirements', methods=['GET', 'POST'])
+def requirements_list():
+    if request.method == 'POST':
+        role = session.get('role')
+        if role not in ('Account Manager', 'Admin'):
+            return jsonify({"error": "Account Manager or Admin role required."}), 403
+
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        data = request.get_json(silent=True) or {}
+        title = (data.get('title') or '').strip()
+        doc_type = data.get('doc_type')
+        raw_text = (data.get('raw_text') or '').strip()
+
+        if doc_type not in ('brief', 'proposal', 'general'):
+            return jsonify({"error": "doc_type must be one of: brief, proposal, general"}), 400
+        if not title or not raw_text:
+            return jsonify({"error": "Title and document text are required"}), 400
+
+        doc = RequirementDocument(title=title, doc_type=doc_type, raw_text=raw_text, uploaded_by=user_id)
+        db_session.add(doc)
+        db_session.commit()
+        return jsonify({"id": doc.id}), 201
+
+    docs = db_session.query(RequirementDocument).filter_by(is_active=True).order_by(RequirementDocument.uploaded_at.desc()).all()
+    return jsonify([
+        {
+            "id": d.id,
+            "title": d.title,
+            "doc_type": d.doc_type,
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "uploaded_by": (db_session.query(User).get(d.uploaded_by).username if d.uploaded_by else None),
+            "length": len(d.raw_text or ''),
+        } for d in docs
+    ])
+
+
+@app.route('/api/requirements/<int:doc_id>/deactivate', methods=['POST'])
+def deactivate_requirement(doc_id):
+    role = session.get('role')
+    if role not in ('Account Manager', 'Admin'):
+        return jsonify({"error": "Account Manager or Admin role required."}), 403
+
+    doc = db_session.query(RequirementDocument).get(doc_id)
+    if not doc:
+        return jsonify({"error": "Not found"}), 404
+
+    doc.is_active = False
+    db_session.commit()
+    return jsonify({"message": "Deactivated"})
+
+
+# Reference documents are engagement-scoped working material (templates, client RFPs,
+# background docs) that enrich generation — unlike RequirementDocuments, which grade
+# output. Any logged-in role can manage them, same trust level as uploading transcripts.
+@app.route('/api/engagements/<int:eng_id>/references', methods=['GET', 'POST'])
+def engagement_references(eng_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    eng = db_session.query(Engagement).get(eng_id)
+    if not eng:
+        return jsonify({"error": "Engagement not found"}), 404
+
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        title = (data.get('title') or '').strip()
+        purpose = data.get('purpose')
+        raw_text = (data.get('raw_text') or '').strip()
+
+        if purpose not in ('structure', 'content'):
+            return jsonify({"error": "purpose must be one of: structure, content"}), 400
+        if not title or not raw_text:
+            return jsonify({"error": "Title and document text are required"}), 400
+
+        doc = ReferenceDocument(engagement_id=eng_id, title=title, purpose=purpose, raw_text=raw_text, uploaded_by=user_id)
+        db_session.add(doc)
+        db_session.commit()
+        return jsonify({"id": doc.id}), 201
+
+    docs = db_session.query(ReferenceDocument).filter_by(
+        engagement_id=eng_id, is_active=True
+    ).order_by(ReferenceDocument.uploaded_at.desc()).all()
+    return jsonify([
+        {
+            "id": d.id,
+            "title": d.title,
+            "purpose": d.purpose,
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "uploaded_by": (db_session.query(User).get(d.uploaded_by).username if d.uploaded_by else None),
+            "length": len(d.raw_text or ''),
+        } for d in docs
+    ])
+
+
+@app.route('/api/references/<int:ref_id>/deactivate', methods=['POST'])
+def deactivate_reference(ref_id):
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    doc = db_session.query(ReferenceDocument).get(ref_id)
+    if not doc:
+        return jsonify({"error": "Not found"}), 404
+
+    doc.is_active = False
+    db_session.commit()
+    return jsonify({"message": "Deactivated"})
+
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -540,20 +781,10 @@ def upload_transcript(eng_id):
     if eng.is_processing:
         return jsonify({"error": "This engagement is already being processed"}), 409
 
-    # awaiting_transcript: first client-meeting transcript, generates the brief.
-    # brief_ready: a brief already exists but the producer hasn't yet moved to the
-    #   proposal stage — another client-meeting transcript here *refines* the brief
-    #   (multi-round intake) rather than jumping to the proposal.
-    # awaiting_review_transcript: the producer explicitly advanced past the brief —
-    #   this transcript is the review meeting and generates the proposal.
-    if eng.status == 'awaiting_transcript':
-        kind, task = 'client_meeting', _process_brief_generation
-    elif eng.status == 'brief_ready':
-        kind, task = 'client_meeting', _process_brief_refinement
-    elif eng.status == 'awaiting_review_transcript':
-        kind, task = 'brief_review_meeting', _process_proposal_generation
-    else:
+    dispatch = _transcript_dispatch_for(eng.status)
+    if not dispatch:
         return jsonify({"error": "Invalid engagement state for upload"}), 400
+    kind, task = dispatch
 
     # Commit the transcript insert in its own short transaction — the agent call
     # that follows can take up to ~2 minutes, and SQLite only allows one writer
@@ -587,6 +818,269 @@ def advance_engagement(eng_id):
     eng.status = 'awaiting_review_transcript'
     db_session.commit()
     return jsonify({"status": eng.status})
+
+# ---------------------------------------------------------------------------
+# Fathom transcript inbox
+# ---------------------------------------------------------------------------
+# Zoom meetings recorded by Fathom arrive here automatically via webhook (see
+# fathom.py for verification/parsing and how to register the webhook). Each one
+# lands as an InboundTranscript in the inbox, where it can be assigned to a
+# teammate, attached to an engagement, or dismissed. Attaching creates a normal
+# Transcript row and runs the exact same agent pipeline as a manual paste-upload
+# — which stage (brief vs proposal) is decided by the engagement's status, just
+# like manual uploads. When the meeting title names exactly one known client,
+# the webhook attaches and processes immediately so the brief/proposal is
+# already generated by the time someone opens the app.
+
+DISPATCHABLE_STATUSES = ('awaiting_transcript', 'brief_ready', 'awaiting_review_transcript')
+
+
+def _attach_inbound(inbound, eng, user_id=None, auto=False):
+    """Create a real Transcript from an inbound item and kick off background agent
+    processing. Caller must already have checked eng.is_processing. Returns False
+    when the engagement's state can't accept a transcript."""
+    dispatch = _transcript_dispatch_for(eng.status)
+    if not dispatch:
+        return False
+    kind, task = dispatch
+
+    transcript = Transcript(
+        engagement_id=eng.id, kind=kind, raw_text=inbound.raw_text, uploaded_by=user_id,
+        # Prefill from Fathom's calendar metadata so the meeting card isn't empty
+        # while the agent runs; the agent overwrites these with what the transcript
+        # itself states once processing finishes.
+        meeting_date=inbound.meeting_date,
+        duration_minutes=inbound.duration_minutes,
+        attendees=inbound.attendees or [],
+    )
+    db_session.add(transcript)
+    eng.is_processing = True
+    eng.processing_error = None
+    db_session.flush()
+
+    inbound.status = 'processed'
+    inbound.engagement_id = eng.id
+    inbound.transcript_id = transcript.id
+    inbound.auto_matched = auto
+
+    db_session.add(AgentEvent(
+        engagement_id=eng.id,
+        agent='Fathom Intake',
+        trigger='fathom_webhook' if auto else 'inbox_attach',
+        reasoning_summary=(
+            f"Meeting '{inbound.title or 'Untitled'}' arrived from Fathom and was "
+            + ("auto-matched to this client by meeting title." if auto else "attached from the transcript inbox.")
+        ),
+        action='Ingested Fathom Transcript',
+        tokens_used=0
+    ))
+    db_session.commit()
+
+    _executor.submit(task, eng.id, transcript.id)
+    return True
+
+
+def _auto_match_client(title):
+    """The single client whose name appears in the meeting title, or None when zero
+    or several match — anything ambiguous stays in the inbox for a human."""
+    if not title:
+        return None
+    title_lower = title.lower()
+    matches = [
+        c for c in db_session.query(Client).all()
+        if c.name and len(c.name) >= 3 and c.name.lower() in title_lower
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _open_engagement_for(client_id):
+    return db_session.query(Engagement).filter(
+        Engagement.client_id == client_id,
+        Engagement.status.in_(DISPATCHABLE_STATUSES),
+        Engagement.is_processing == False  # noqa: E712
+    ).order_by(Engagement.id.desc()).first()
+
+
+@app.route('/api/webhooks/fathom', methods=['POST'])
+def fathom_webhook():
+    # No session auth — Fathom calls this. Authenticity comes from the HMAC
+    # signature instead (skipped only when FATHOM_WEBHOOK_SECRET is unset, i.e. dev).
+    from fathom import verify_signature, parse_meeting_payload
+    if not verify_signature(request.headers, request.get_data()):
+        return jsonify({"error": "Invalid webhook signature"}), 401
+
+    data = request.get_json(silent=True) or {}
+    parsed = parse_meeting_payload(data)
+
+    if not parsed['raw_text']:
+        # Nothing to ingest — webhook probably created without include_transcript.
+        return jsonify({"message": "No transcript in payload — ignored"}), 200
+
+    if parsed['external_id']:
+        existing = db_session.query(InboundTranscript).filter_by(external_id=parsed['external_id']).first()
+        if existing:  # Fathom retries deliveries — dedupe on recording id
+            return jsonify({"message": "Already received", "id": existing.id}), 200
+
+    inbound = InboundTranscript(source='fathom', **parsed)
+    db_session.add(inbound)
+    db_session.commit()
+
+    # Auto-attach only external meetings whose title names exactly one known
+    # client; everything else waits in the inbox for a human decision.
+    auto_processed = False
+    if parsed['is_external_meeting']:
+        client = _auto_match_client(parsed['title'])
+        if client:
+            eng = _open_engagement_for(client.id)
+            if not eng:
+                eng = Engagement(client_id=client.id, status='awaiting_transcript')
+                db_session.add(eng)
+                db_session.commit()
+            auto_processed = _attach_inbound(inbound, eng, user_id=None, auto=True)
+
+    return jsonify({"id": inbound.id, "auto_processed": auto_processed}), 201
+
+
+def _inbox_item_json(item, include_raw=False):
+    assignee = db_session.query(User).get(item.assigned_to) if item.assigned_to else None
+    payload = {
+        "id": item.id,
+        "source": item.source,
+        "title": item.title,
+        "share_url": item.share_url,
+        "recorded_by": item.recorded_by,
+        "meeting_date": item.meeting_date,
+        "duration_minutes": item.duration_minutes,
+        "attendees": item.attendees or [],
+        "is_external_meeting": bool(item.is_external_meeting),
+        "summary": item.summary,
+        "preview": _snippet(item.raw_text, 180),
+        "status": item.status,
+        "assigned_to": {"id": assignee.id, "username": assignee.username} if assignee else None,
+        "engagement_id": item.engagement_id,
+        "auto_matched": bool(item.auto_matched),
+        "received_at": item.received_at.isoformat() if item.received_at else None,
+    }
+    if include_raw:
+        payload["raw_text"] = item.raw_text
+    return payload
+
+
+@app.route('/api/inbox', methods=['GET'])
+def inbox_list():
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    status = request.args.get('status', 'pending')
+    query = db_session.query(InboundTranscript)
+    if status != 'all':
+        query = query.filter_by(status=status)
+    items = query.order_by(InboundTranscript.received_at.desc()).all()
+
+    pending_count = db_session.query(func.count(InboundTranscript.id)).filter_by(status='pending').scalar() or 0
+    return jsonify({
+        "items": [_inbox_item_json(i) for i in items],
+        "pending_count": pending_count,
+    })
+
+
+@app.route('/api/inbox/<int:item_id>', methods=['GET'])
+def inbox_detail(item_id):
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+    item = db_session.query(InboundTranscript).get(item_id)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(_inbox_item_json(item, include_raw=True))
+
+
+@app.route('/api/inbox/<int:item_id>/assign', methods=['POST'])
+def inbox_assign(item_id):
+    role = session.get('role')
+    if role not in ('Account Manager', 'Admin'):
+        return jsonify({"error": "Account Manager or Admin role required."}), 403
+
+    item = db_session.query(InboundTranscript).get(item_id)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    if item.status != 'pending':
+        return jsonify({"error": "Only pending items can be assigned"}), 400
+
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id')  # null unassigns
+    if user_id is not None:
+        if not db_session.query(User).get(user_id):
+            return jsonify({"error": "User not found"}), 404
+
+    item.assigned_to = user_id
+    db_session.commit()
+    return jsonify(_inbox_item_json(item))
+
+
+@app.route('/api/inbox/<int:item_id>/attach', methods=['POST'])
+def inbox_attach(item_id):
+    """Attach a pending inbound transcript to an engagement — either an existing one
+    (engagement_id) or a fresh one for a client (client_id). Which agent runs (brief
+    generation/refinement vs proposal) follows from the engagement's status, exactly
+    like a manual upload."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    item = db_session.query(InboundTranscript).get(item_id)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    if item.status != 'pending':
+        return jsonify({"error": "This transcript has already been handled"}), 400
+
+    data = request.get_json(silent=True) or {}
+    eng_id = data.get('engagement_id')
+    client_id = data.get('client_id')
+
+    if eng_id is not None:
+        eng = db_session.query(Engagement).get(eng_id)
+        if not eng:
+            return jsonify({"error": "Engagement not found"}), 404
+    elif client_id is not None:
+        if not db_session.get(Client, client_id):
+            return jsonify({"error": "Client not found"}), 404
+        eng = Engagement(client_id=client_id, status='awaiting_transcript')
+        db_session.add(eng)
+        db_session.commit()
+    else:
+        return jsonify({"error": "engagement_id or client_id is required"}), 400
+
+    if eng.is_processing:
+        return jsonify({"error": "This engagement is already being processed"}), 409
+
+    if not _attach_inbound(item, eng, user_id=user_id, auto=False):
+        return jsonify({"error": "Invalid engagement state for a new transcript"}), 400
+
+    return jsonify({"processing": True, "engagement_id": eng.id}), 202
+
+
+@app.route('/api/inbox/<int:item_id>/dismiss', methods=['POST'])
+def inbox_dismiss(item_id):
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+    item = db_session.query(InboundTranscript).get(item_id)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    if item.status == 'processed':
+        return jsonify({"error": "Already attached to an engagement"}), 400
+    item.status = 'dismissed'
+    db_session.commit()
+    return jsonify({"message": "Dismissed"})
+
+
+@app.route('/api/users', methods=['GET'])
+def users_list():
+    # For the inbox assignment dropdown — any logged-in role can see the roster.
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+    users = db_session.query(User).order_by(User.username.asc()).all()
+    return jsonify([{"id": u.id, "username": u.username, "role": u.role} for u in users])
+
 
 @app.route('/api/engagements/<int:eng_id>/proposals/review', methods=['POST'])
 def review_proposal(eng_id):
@@ -639,6 +1133,98 @@ def review_proposal(eng_id):
 
     return jsonify({"error": "Invalid action"}), 400
 
+# ---------------------------------------------------------------------------
+# Part 2: client acceptance → production staffing
+# ---------------------------------------------------------------------------
+# Once the AM records that the client accepted the (already approved) proposal,
+# the Resource Planner assembles a production plan from the seeded Talent pool:
+# crew per team_shape role, tools/equipment implied by the deliverables, and a
+# kickoff checklist. Matching is deterministic keyword/skill scoring (staffing.py)
+# — no LLM call — so acceptance responds instantly. Only engagement.status moves
+# to 'accepted'; proposal.status stays 'approved' because analytics revenue and
+# the PDF-download gate both key off it.
+
+@app.route('/api/engagements/<int:eng_id>/accept', methods=['POST'])
+def accept_engagement(eng_id):
+    from staffing import build_staffing_plan
+    role = session.get('role')
+    if role not in ('Account Manager', 'Admin'):
+        return jsonify({"error": "Account Manager or Admin role required."}), 403
+
+    eng = db_session.query(Engagement).get(eng_id)
+    if not eng:
+        return jsonify({"error": "Engagement not found"}), 404
+
+    existing = db_session.query(StaffingPlan).filter_by(engagement_id=eng_id).order_by(StaffingPlan.id.desc()).first()
+    if eng.status == 'accepted' and existing:
+        return jsonify({"plan": existing.plan, "already_accepted": True})
+
+    if eng.status != 'approved':
+        return jsonify({"error": "The proposal must be approved before it can be marked client-accepted."}), 400
+
+    proposal = db_session.query(Proposal).filter_by(engagement_id=eng_id).order_by(Proposal.id.desc()).first()
+    if not proposal:
+        return jsonify({"error": "No proposal found"}), 404
+
+    talents = db_session.query(Talent).filter_by(is_active=True).order_by(Talent.id).all()
+    if not talents:
+        return jsonify({"error": "Talent pool is empty — run seed_talents.py first."}), 409
+
+    plan = build_staffing_plan(proposal, talents, eng.client.name)
+
+    eng.status = 'accepted'
+    db_session.add(StaffingPlan(engagement_id=eng_id, proposal_id=proposal.id, plan=plan))
+    db_session.add(AgentEvent(
+        engagement_id=eng_id,
+        agent='Account Manager (Human)',
+        trigger='client_acceptance',
+        reasoning_summary='Recorded that the client accepted the proposal.',
+        action='Marked Proposal Client-Accepted',
+        tokens_used=0
+    ))
+    db_session.add(AgentEvent(
+        engagement_id=eng_id,
+        agent='Resource Planner',
+        trigger='client_acceptance',
+        reasoning_summary=(
+            f"Matched the proposal's team shape against the talent pool: assembled a "
+            f"{len(plan['team'])}-person crew"
+            + (f" with {len(plan['unfilled'])} role(s) still to source externally" if plan['unfilled'] else "")
+            + f", flagged {len(plan['tools'])} tool/equipment categories, and drafted the kickoff checklist."
+        ),
+        action='Assembled Production Team',
+        tokens_used=0
+    ))
+    db_session.commit()
+
+    return jsonify({"plan": plan}), 201
+
+
+@app.route('/api/engagements/<int:eng_id>/staffing', methods=['GET'])
+def get_staffing(eng_id):
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+    sp = db_session.query(StaffingPlan).filter_by(engagement_id=eng_id).order_by(StaffingPlan.id.desc()).first()
+    if not sp:
+        return jsonify({"available": False})
+    return jsonify({"available": True, "plan": sp.plan, "created_at": sp.created_at.isoformat() if sp.created_at else None})
+
+
+@app.route('/api/talents', methods=['GET'])
+def talents_list():
+    if not session.get('user_id'):
+        return jsonify({"error": "Unauthorized"}), 401
+    talents = db_session.query(Talent).filter_by(is_active=True).order_by(Talent.name.asc()).all()
+    return jsonify([
+        {
+            "id": t.id, "name": t.name, "title": t.title, "skills": t.skills or [],
+            "day_rate_kes": t.day_rate_kes, "availability": t.availability,
+            "available_from": t.available_from, "location": t.location,
+            "years_experience": t.years_experience, "highlight": t.highlight,
+        } for t in talents
+    ])
+
+
 @app.route('/api/rate-card', methods=['GET'])
 def get_rate_card():
     items = db_session.query(RateCardItem).all()
@@ -653,7 +1239,7 @@ def get_rate_card():
 # Analytics
 # ---------------------------------------------------------------------------
 
-PIPELINE_STAGES = ['awaiting_transcript', 'brief_ready', 'awaiting_review_transcript', 'proposal_ready', 'in_review', 'approved']
+PIPELINE_STAGES = ['awaiting_transcript', 'brief_ready', 'awaiting_review_transcript', 'proposal_ready', 'in_review', 'approved', 'accepted']
 
 
 def _line_item_total(items):
@@ -785,7 +1371,8 @@ def get_analytics():
         "totals": {
             "clients": len(clients),
             "engagements": len(engagements),
-            "approved": status_counts.get('approved', 0)
+            # 'accepted' engagements passed through approval — they still count as won
+            "approved": status_counts.get('approved', 0) + status_counts.get('accepted', 0)
         },
         "funnel": funnel,
         "pipeline_value_kes": pipeline_value_kes,

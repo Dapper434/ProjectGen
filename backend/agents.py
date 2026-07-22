@@ -246,7 +246,7 @@ def render_proposal_markdown(data: dict, client_name: str) -> str:
 {open_questions_block}"""
 
 
-def generate_brief(transcript_text: str, client_name: str, client_history: str = "") -> dict:
+def generate_brief(transcript_text: str, client_name: str, client_history: str = "", reference_material: str = "") -> dict:
     system_prompt = f"""You are a Production Brief Generator for a creative agency middleman platform. Your job is to turn a raw meeting notes summary (captured by an AI notetaker during the client's intake call) into a structured, professional Production Brief that a creative team can act on.
 
 <task>
@@ -255,6 +255,7 @@ def generate_brief(transcript_text: str, client_name: str, client_history: str =
 3. Also extract meeting metadata: only fill "meeting_date" or "duration_minutes" if explicitly stated in the transcript (e.g. "this was a 45 minute call" or "recorded March 3rd") — never guess or estimate a precise value. "attendees" lists people/roles who were actually present or speaking on the call (may overlap with key_stakeholders, but this is specifically about who was on THIS call). "summary" is a short, neutral 2-4 sentence recap of what was actually discussed in the call itself — distinct from the brief content below.
 4. Keep language clear and professional — this brief may be shown to both the client and the creative team.
 5. If this client's past engagement history is provided below, use it only for continuity and context (e.g. recognizing a repeat pattern, being consistent with past scoping) — never invent details for *this* engagement from it, and never treat it as a substitute for what this transcript actually says.
+6. If agency-provided reference material is included below, use it to enrich this brief. Material labeled a structure/template reference shows the organization and phrasing conventions your field *values* should follow — the JSON keys themselves are fixed and must never change. Material labeled content/background (e.g. the client's own RFP, brand guidelines) may supply additional factual requirements and context that belong in this brief. If reference material conflicts with the transcript, the transcript wins. Never copy template boilerplate that doesn't apply to this engagement.
 </task>
 
 <output_format>
@@ -275,12 +276,13 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys:
 </output_format>"""
 
     history_block = f"\n\n<this_clients_past_engagements>\n{client_history}\n</this_clients_past_engagements>" if client_history else ""
+    reference_block = f"\n\n<reference_material>\n{reference_material}\n</reference_material>" if reference_material else ""
 
     user_prompt = f"""<meeting_summary>
 {transcript_text}
 </meeting_summary>
 
-Client Name context: {client_name}{history_block}"""
+Client Name context: {client_name}{history_block}{reference_block}"""
 
     if not NIM_API_KEY:
         print("WARNING: No NIM_API_KEY provided. Using dummy brief generator.")
@@ -415,7 +417,7 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys, each a l
             return empty
 
 
-def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], client_history: str = "") -> dict:
+def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], client_history: str = "", reference_material: str = "") -> dict:
 
     signals = extract_meeting_signals(new_transcript)
     signal_tokens = signals.pop('_tokens_used', 0)
@@ -447,6 +449,7 @@ def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_
 3. If a signal contradicts the original brief, the signal wins (it's more recent) — but state the change explicitly in "changelog" so nothing is overwritten silently.
 4. Use "Past Projects for Reference" below as a guide for realistic scoping, phrasing, and pricing patterns when this engagement resembles one of them — but never force a match, and never invent deliverables or pricing that aren't grounded in the brief, the signals, or the rate card.
 4b. If "This Client's Own Engagement History" is provided, use it for continuity with this specific client (recognizing a repeat relationship, staying consistent with how past work for them was scoped/priced) — it is more relevant than the generic past-projects reference, but still never invent this engagement's content from it.
+4c. If a "<reference_material>" section is provided, use it to enrich this proposal. Material labeled a structure/template reference shows how the agency organizes and phrases proposals within the fixed JSON fields (e.g. how phases are named, how pricing lines are described, how the approach narrative is framed) — the JSON keys themselves never change. Material labeled content/background (e.g. the client's own RFP or brand material) may supply factual requirements this proposal must honor. On client-specific facts, the brief and the extracted signals always win over reference material.
 5. Do not invent details that appear in neither the brief nor the signals.
 6. Write the proposal in a persuasive but honest tone — this is the document the client will use to sign off on the work.
 </task>
@@ -481,6 +484,9 @@ This Client's Own Engagement History:
 {client_history_text}
 
 Client Name: {client_name}"""
+
+    if reference_material:
+        user_prompt += f"\n\n<reference_material>\n{reference_material}\n</reference_material>"
 
     def _finish(parsed_json, proposal_tokens):
         parsed_json['rendered_markdown'] = render_proposal_markdown(parsed_json, client_name)
