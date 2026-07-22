@@ -16,7 +16,7 @@ function groupByClient(results) {
   for (const r of results) {
     if (!indexByClient.has(r.client_name)) {
       indexByClient.set(r.client_name, groups.length);
-      groups.push({ client_name: r.client_name, items: [] });
+      groups.push({ client_name: r.client_name, client_id: r.client_id, items: [] });
     }
     groups[indexByClient.get(r.client_name)].items.push(r);
   }
@@ -67,6 +67,12 @@ export default function SearchBar() {
 
   const goTo = (id) => {
     navigate(`/engagements/${id}`);
+    setOpen(false);
+    setQuery('');
+  };
+
+  const goToClient = (clientId) => {
+    navigate(`/clients/${clientId}`);
     setOpen(false);
     setQuery('');
   };
@@ -131,12 +137,15 @@ export default function SearchBar() {
             <ul className="max-h-96 overflow-auto divide-y" style={{ borderColor: '#191919' }}>
               {groups.map((group) => (
                 <li key={group.client_name}>
-                  <div className="px-4 pt-2.5 pb-1.5 flex items-center gap-2 bg-[#1a1a1a]">
+                  <button
+                    onClick={() => goToClient(group.client_id)}
+                    className="w-full px-4 pt-2.5 pb-1.5 flex items-center gap-2 bg-[#1a1a1a] hover:bg-[#202020] transition-colors text-left"
+                  >
                     <span className="text-xs font-medium text-[#d6d4c9] truncate">{group.client_name}</span>
                     {group.items.length > 1 && (
                       <span className="text-[10px] text-[#6e6e67]">({group.items.length} engagements)</span>
                     )}
-                  </div>
+                  </button>
                   <ul>
                     {group.items.map((r) => (
                       <li key={r.id}>

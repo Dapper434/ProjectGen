@@ -13,6 +13,7 @@ const pipeline = [
 const demoAccounts = [
   { username: 'producer', password: 'demo', label: 'Producer' },
   { username: 'am', password: 'demo', label: 'Account Manager' },
+  { username: 'admin', password: 'demo', label: 'Admin' },
 ];
 
 export default function Login() {
