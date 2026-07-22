@@ -28,7 +28,8 @@ def seed_db():
     # 1. Users (Demo purposes)
     producer = User(username='producer', password_hash=generate_password_hash('demo'), role='Producer')
     account_manager = User(username='am', password_hash=generate_password_hash('demo'), role='Account Manager')
-    db_session.add_all([producer, account_manager])
+    admin = User(username='admin', password_hash=generate_password_hash('demo'), role='Admin')
+    db_session.add_all([producer, account_manager, admin])
     db_session.commit()
 
     # 2. Clients

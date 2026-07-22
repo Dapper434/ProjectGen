@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, JSON, DateTime
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, JSON, DateTime, Boolean
 from sqlalchemy.orm import relationship
 import datetime
 from database import Base
@@ -22,7 +22,10 @@ class Engagement(Base):
     id = Column(Integer, primary_key=True)
     client_id = Column(Integer, ForeignKey('clients.id'))
     status = Column(String(50)) # awaiting_transcript | brief_ready | awaiting_review_transcript | proposal_ready | in_review | approved
-    
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    is_processing = Column(Boolean, default=False)
+    processing_error = Column(Text)
+
     client = relationship("Client", backref="engagements")
 
 class Transcript(Base):
@@ -33,6 +36,10 @@ class Transcript(Base):
     raw_text = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
     uploaded_by = Column(Integer, ForeignKey('users.id'))
+    meeting_date = Column(String(100))       # agent-extracted, only when explicitly stated in the transcript
+    duration_minutes = Column(Integer)       # agent-extracted, only when explicitly stated
+    attendees = Column(JSON)                 # list of strings
+    summary = Column(Text)                   # short agent-generated recap of this specific meeting
 
 class Brief(Base):
     __tablename__ = 'briefs'

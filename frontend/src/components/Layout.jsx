@@ -1,11 +1,15 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Layers, LogOut, Plus } from 'lucide-react';
+import { LayoutDashboard, Layers, BarChart3, LogOut, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import SearchBar from './SearchBar';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/dashboard' },
   { icon: Layers, label: 'Engagements', to: '/engagements' },
+];
+
+const adminNavItems = [
+  { icon: BarChart3, label: 'Analytics', to: '/analytics' },
 ];
 
 export default function Layout() {
@@ -56,7 +60,7 @@ export default function Layout() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-2 flex flex-col gap-0.5">
-          {navItems.map(({ icon: Icon, label, to }) => (
+          {[...navItems, ...(user.role === 'Admin' ? adminNavItems : [])].map(({ icon: Icon, label, to }) => (
             <NavLink
               key={to}
               to={to}

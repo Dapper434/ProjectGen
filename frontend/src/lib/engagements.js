@@ -48,3 +48,9 @@ export function timeAgo(isoString) {
   if (days === 1) return 'Yesterday';
   return `${days}d ago`;
 }
+
+export function formatKes(n = 0) {
+  if (Math.abs(n) >= 1_000_000) return `KES ${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1_000) return `KES ${(n / 1_000).toFixed(1)}K`;
+  return `KES ${n.toLocaleString()}`;
+}

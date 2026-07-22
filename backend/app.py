@@ -12,6 +12,7 @@ from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCa
 from werkzeug.security import check_password_hash
 from sqlalchemy import cast, String
 from weasyprint import HTML
+from concurrent.futures import ThreadPoolExecutor
 import io
 import html
 from datetime import datetime
@@ -24,34 +25,270 @@ CORS(app, supports_credentials=True)
 def shutdown_session(exception=None):
     db_session.remove()
 
+# ---------------------------------------------------------------------------
+# Background agent processing
+# ---------------------------------------------------------------------------
+# Agent calls are real LLM round trips (seconds to ~1-2 minutes). Running them
+# inline would block a Flask worker thread for the whole duration, so the two
+# upload/review endpoints dispatch them here and return immediately; the
+# frontend polls GET /api/engagements/<id> and watches `is_processing`.
+#
+# Rules for every function below (see SYSTEM_ANALYSIS-adjacent plan notes):
+#   - only primitives (ids, strings) are passed in — never ORM objects or
+#     anything tied to the request/session context, since this runs on a
+#     different thread after the request has already returned.
+#   - each function re-queries fresh ORM objects via `db_session`, which is
+#     thread-local (no scopefunc configured in database.py), so this is safe
+#     without any Flask app-context plumbing.
+#   - `db_session.remove()` runs in a `finally:` — required because the pool
+#     reuses OS threads across jobs, and `@app.teardown_appcontext` only fires
+#     for request contexts, never for executor threads.
+#   - failures are caught and written to `processing_error` instead of raised,
+#     since there is no HTTP request left to receive them.
+_executor = ThreadPoolExecutor(max_workers=3)
+
+
+def _client_relationship_context(client_id, exclude_engagement_id):
+    """Short text summary of a client's other engagements, for feeding into the brief/
+    proposal prompts as continuity context — distinct from the agency-wide PastProject
+    reference table, this is specific to *this* client's own history."""
+    engagements = db_session.query(Engagement).filter(
+        Engagement.client_id == client_id,
+        Engagement.id != exclude_engagement_id
+    ).order_by(Engagement.id.desc()).limit(5).all()
+
+    lines = []
+    for eng in engagements:
+        brief = db_session.query(Brief).filter_by(engagement_id=eng.id).order_by(Brief.id.desc()).first()
+        if not brief:
+            continue
+        proposal = db_session.query(Proposal).filter_by(engagement_id=eng.id).order_by(Proposal.id.desc()).first()
+        work_type = (brief.work_type or 'unspecified').replace('-', ' ')
+        line = f"- [{eng.status}] {work_type} engagement"
+        if proposal:
+            approach = (proposal.structured_json or {}).get('approach')
+            if approach:
+                line += f": {approach}"
+        lines.append(line)
+
+    return chr(10).join(lines)
+
+
+def _fail_processing(eng_id, error):
+    db_session.rollback()
+    eng = db_session.query(Engagement).get(eng_id)
+    if eng:
+        eng.is_processing = False
+        eng.processing_error = str(error)
+        db_session.commit()
+
+
+def _process_brief_generation(eng_id, transcript_id):
+    from agents import generate_brief
+    try:
+        eng = db_session.query(Engagement).get(eng_id)
+        transcript = db_session.query(Transcript).get(transcript_id)
+        client_history = _client_relationship_context(eng.client_id, exclude_engagement_id=eng_id)
+
+        brief_json = generate_brief(transcript.raw_text, eng.client.name, client_history=client_history)
+        tokens = brief_json.pop('_tokens_used', 0)
+
+        transcript.meeting_date = brief_json.get('meeting_date')
+        transcript.duration_minutes = brief_json.get('duration_minutes')
+        transcript.attendees = brief_json.get('attendees') or []
+        transcript.summary = brief_json.get('summary')
+
+        brief = Brief(
+            engagement_id=eng_id,
+            transcript_id=transcript_id,
+            structured_json=brief_json,
+            rendered_markdown=brief_json.get('rendered_markdown', ''),
+            work_type=brief_json.get('work_type', 'unknown')
+        )
+        eng.status = 'brief_ready'
+        eng.is_processing = False
+        eng.processing_error = None
+        db_session.add(brief)
+
+        db_session.add(AgentEvent(
+            engagement_id=eng_id,
+            agent='Brief Generator',
+            trigger='client_meeting_transcript_upload',
+            reasoning_summary='Processed initial client transcript to generate structured production brief.',
+            action='Created Brief',
+            tokens_used=tokens
+        ))
+        db_session.commit()
+    except Exception as e:
+        _fail_processing(eng_id, f"Agent failed: {e}")
+    finally:
+        db_session.remove()
+
+
+def _process_brief_refinement(eng_id, transcript_id):
+    from agents import refine_brief
+    try:
+        eng = db_session.query(Engagement).get(eng_id)
+        transcript = db_session.query(Transcript).get(transcript_id)
+        existing_brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
+        if not existing_brief:
+            raise RuntimeError("No existing brief to refine")
+
+        brief_json = refine_brief(existing_brief, transcript.raw_text, eng.client.name)
+        tokens = brief_json.pop('_tokens_used', 0)
+
+        transcript.meeting_date = brief_json.get('meeting_date')
+        transcript.duration_minutes = brief_json.get('duration_minutes')
+        transcript.attendees = brief_json.get('attendees') or []
+        transcript.summary = brief_json.get('summary')
+
+        new_brief = Brief(
+            engagement_id=eng_id,
+            transcript_id=transcript_id,
+            structured_json=brief_json,
+            rendered_markdown=brief_json.get('rendered_markdown', ''),
+            work_type=brief_json.get('work_type') or existing_brief.work_type,
+            version=(existing_brief.version or 1) + 1
+        )
+        # Status stays 'brief_ready' — refining doesn't advance the pipeline; the
+        # producer still has to explicitly move to the proposal stage.
+        eng.is_processing = False
+        eng.processing_error = None
+        db_session.add(new_brief)
+
+        db_session.add(AgentEvent(
+            engagement_id=eng_id,
+            agent='Brief Generator',
+            trigger='additional_client_meeting_transcript_upload',
+            reasoning_summary='Refined the production brief with an additional client meeting transcript.',
+            action='Refined Brief',
+            tokens_used=tokens
+        ))
+        db_session.commit()
+    except Exception as e:
+        _fail_processing(eng_id, f"Agent failed: {e}")
+    finally:
+        db_session.remove()
+
+
+def _process_proposal_generation(eng_id, transcript_id):
+    from agents import generate_proposal
+    try:
+        eng = db_session.query(Engagement).get(eng_id)
+        transcript = db_session.query(Transcript).get(transcript_id)
+        brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
+        if not brief:
+            raise RuntimeError("No brief found for this engagement")
+
+        past_projects = db_session.query(PastProject).limit(3).all()
+        rate_card = db_session.query(RateCardItem).all()
+        client_history = _client_relationship_context(eng.client_id, exclude_engagement_id=eng_id)
+
+        proposal_json = generate_proposal(transcript.raw_text, brief, eng.client.name, past_projects, rate_card, client_history=client_history)
+        signal_tokens = proposal_json.pop('_signal_tokens_used', 0)
+        proposal_tokens = proposal_json.pop('_proposal_tokens_used', 0)
+        extracted_signals = proposal_json.get('extracted_signals', {})
+        extracted_signals_markdown = proposal_json.get('extracted_signals_markdown', '')
+
+        transcript.meeting_date = extracted_signals.get('meeting_date')
+        transcript.duration_minutes = extracted_signals.get('duration_minutes')
+        transcript.attendees = extracted_signals.get('attendees') or []
+        transcript.summary = extracted_signals.get('summary')
+
+        proposal = Proposal(
+            engagement_id=eng_id,
+            brief_id=brief.id,
+            review_transcript_id=transcript_id,
+            structured_json=proposal_json,
+            rendered_markdown=proposal_json.get('rendered_markdown', ''),
+            pricing_line_items=proposal_json.get('pricing', []),
+            status='draft'
+        )
+        eng.status = 'proposal_ready'
+        eng.is_processing = False
+        eng.processing_error = None
+        db_session.add(proposal)
+
+        db_session.add(AgentEvent(
+            engagement_id=eng_id,
+            agent='Proposal Generator',
+            trigger='review_meeting_transcript_upload',
+            reasoning_summary='Combined brief, review notes, rate card, and past projects to draft a full client proposal.',
+            action='Created Proposal',
+            tokens_used=proposal_tokens
+        ))
+        db_session.add(AgentEvent(
+            engagement_id=eng_id,
+            agent='Signal Extractor',
+            trigger='review_meeting_transcript_upload',
+            reasoning_summary=extracted_signals_markdown,
+            action='Extracted Meeting Signals',
+            tokens_used=signal_tokens
+        ))
+        db_session.commit()
+    except Exception as e:
+        _fail_processing(eng_id, f"Agent failed: {e}")
+    finally:
+        db_session.remove()
+
+
+def _process_proposal_revision(eng_id, proposal_id, notes):
+    from agents import revise_proposal
+    try:
+        eng = db_session.query(Engagement).get(eng_id)
+        proposal = db_session.query(Proposal).get(proposal_id)
+        rate_card = db_session.query(RateCardItem).all()
+
+        proposal_json = revise_proposal(proposal, notes, eng.client.name, rate_card)
+        tokens = proposal_json.pop('_tokens_used', 0)
+
+        new_proposal = Proposal(
+            engagement_id=eng_id,
+            brief_id=proposal.brief_id,
+            review_transcript_id=proposal.review_transcript_id,
+            structured_json=proposal_json,
+            rendered_markdown=proposal_json.get('rendered_markdown', ''),
+            pricing_line_items=proposal_json.get('pricing', []),
+            status='in_review',
+            version=proposal.version + 1
+        )
+        eng.status = 'in_review'
+        eng.is_processing = False
+        eng.processing_error = None
+        db_session.add(new_proposal)
+
+        db_session.add(AgentEvent(
+            engagement_id=eng_id,
+            agent='Proposal Generator',
+            trigger='manager_send_back',
+            reasoning_summary=f'Applied Account Manager requested changes to the existing proposal: {notes}',
+            action='Revised Proposal',
+            tokens_used=tokens
+        ))
+        db_session.commit()
+    except Exception as e:
+        _fail_processing(eng_id, f"Agent failed on revision: {e}")
+    finally:
+        db_session.remove()
+
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    print("Received login request:", data)
-    
     if not data:
-        print("Request JSON is missing or None. Headers:", request.headers)
         return jsonify({"error": "No JSON data"}), 400
-        
+
     username = data.get('username')
     password = data.get('password')
-    role = data.get('role') # User selects role in demo
-    
-    print(f"Attempting login for user: {username}, password: {password}")
 
     user = db_session.query(User).filter_by(username=username).first()
-    print("User found in DB:", user)
-    
-    if user:
-        is_valid = check_password_hash(user.password_hash, password)
-        print("Password check result:", is_valid)
-        if is_valid:
-            session['user_id'] = user.id
-            session['role'] = role or user.role
-            return jsonify({"message": "Logged in successfully", "role": session['role']})
-    else:
-        print("User not found.")
-    
+
+    if user and check_password_hash(user.password_hash, password):
+        session['user_id'] = user.id
+        # Role always comes from the DB record — the login form doesn't (and
+        # shouldn't) let a client choose its own role.
+        session['role'] = user.role
+        return jsonify({"message": "Logged in successfully", "role": session['role']})
+
     return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route('/api/logout', methods=['POST'])
@@ -129,6 +366,109 @@ def clients_list():
         for client in clients
     ])
 
+def _carry_forward_items(brief, proposal):
+    """Open items that should be raised in the *next* meeting for this engagement:
+    the brief's open questions, plus (once a proposal exists) whatever it still
+    couldn't resolve and whatever the review-meeting signal extraction flagged as
+    raised-but-unresolved or genuinely unclear. Deduped case-insensitively since the
+    same item often gets restated across stages."""
+    items = []
+    seen = set()
+
+    def add_all(source_list, label):
+        for item in (source_list or []):
+            if not item:
+                continue
+            key = item.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                items.append({"text": item, "source": label})
+
+    if proposal:
+        # The proposal stage already reconciled the brief's open questions (resolving
+        # what it could, carrying the rest into remaining_open_questions) — trust that
+        # as the current state instead of re-surfacing raw brief questions it already
+        # addressed or superseded (e.g. a question about a deliverable that got cut).
+        data = proposal.structured_json or {}
+        add_all(data.get('remaining_open_questions'), 'Proposal')
+        signals = data.get('extracted_signals') or {}
+        add_all(signals.get('questions_raised'), 'Review Meeting')
+        add_all(signals.get('flagged_unclear'), 'Review Meeting')
+    elif brief:
+        add_all((brief.structured_json or {}).get('open_questions'), 'Brief')
+
+    return items
+
+
+@app.route('/api/clients/<int:client_id>', methods=['GET'])
+def get_client_detail(client_id):
+    """The full interaction history with a client across every engagement/workflow
+    it's had — not just the currently-open one — plus a relationship-wide rollup
+    and carry-forward list deduped across all of them."""
+    client = db_session.query(Client).get(client_id)
+    if not client:
+        return jsonify({"error": "Client not found"}), 404
+
+    engagements = db_session.query(Engagement).filter_by(client_id=client_id).order_by(Engagement.id.desc()).all()
+
+    engagement_summaries = []
+    carry_forward_raw = []
+    approved_revenue_kes = 0
+    pipeline_value_kes = 0
+    last_activity_at = None
+
+    for eng in engagements:
+        brief = db_session.query(Brief).filter_by(engagement_id=eng.id).order_by(Brief.id.desc()).first()
+        proposal = db_session.query(Proposal).filter_by(engagement_id=eng.id).order_by(Proposal.id.desc()).first()
+
+        value_kes = _line_item_total(proposal.pricing_line_items) if proposal else 0
+        if proposal and proposal.status == 'approved':
+            approved_revenue_kes += value_kes
+        elif proposal:
+            pipeline_value_kes += value_kes
+
+        for item in _carry_forward_items(brief, proposal):
+            carry_forward_raw.append({**item, "engagement_id": eng.id})
+
+        latest_event = db_session.query(AgentEvent).filter_by(engagement_id=eng.id).order_by(AgentEvent.created_at.desc()).first()
+        if latest_event and (last_activity_at is None or latest_event.created_at > last_activity_at):
+            last_activity_at = latest_event.created_at
+
+        engagement_summaries.append({
+            "id": eng.id,
+            "status": eng.status,
+            "created_at": eng.created_at.isoformat() if eng.created_at else None,
+            "work_type": brief.work_type if brief else None,
+            "has_brief": bool(brief),
+            "has_proposal": bool(proposal),
+            "proposal_status": proposal.status if proposal else None,
+            "value_kes": value_kes,
+        })
+
+    seen = set()
+    carry_forward = []
+    for item in carry_forward_raw:
+        key = item['text'].strip().lower()
+        if key not in seen:
+            seen.add(key)
+            carry_forward.append(item)
+
+    return jsonify({
+        "id": client.id,
+        "name": client.name,
+        "industry": client.industry,
+        "notes": client.notes,
+        "engagements": engagement_summaries,
+        "carry_forward": carry_forward,
+        "rollup": {
+            "engagement_count": len(engagements),
+            "approved_revenue_kes": approved_revenue_kes,
+            "pipeline_value_kes": pipeline_value_kes,
+            "last_activity_at": last_activity_at.isoformat() if last_activity_at else None,
+        }
+    })
+
+
 @app.route('/api/engagements/<int:eng_id>', methods=['GET'])
 def get_engagement(eng_id):
     eng = db_session.query(Engagement).get(eng_id)
@@ -138,13 +478,18 @@ def get_engagement(eng_id):
     brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
     proposal = db_session.query(Proposal).filter_by(engagement_id=eng_id).order_by(Proposal.id.desc()).first()
     events = db_session.query(AgentEvent).filter_by(engagement_id=eng_id).order_by(AgentEvent.created_at.asc()).all()
-    
+    transcripts = db_session.query(Transcript).filter_by(engagement_id=eng_id).order_by(Transcript.uploaded_at.asc()).all()
+
     return jsonify({
         "id": eng.id,
+        "client_id": eng.client_id,
         "client_name": eng.client.name,
         "client_industry": eng.client.industry,
         "client_notes": eng.client.notes,
         "status": eng.status,
+        "is_processing": bool(eng.is_processing),
+        "processing_error": eng.processing_error,
+        "carry_forward": _carry_forward_items(brief, proposal),
         "brief": {
             "id": brief.id,
             "structured_json": brief.structured_json,
@@ -157,6 +502,17 @@ def get_engagement(eng_id):
             "pricing_line_items": proposal.pricing_line_items,
             "status": proposal.status
         } if proposal else None,
+        "transcripts": [
+            {
+                "id": t.id,
+                "kind": t.kind,
+                "uploaded_at": t.uploaded_at.isoformat() if t.uploaded_at else None,
+                "meeting_date": t.meeting_date,
+                "duration_minutes": t.duration_minutes,
+                "attendees": t.attendees,
+                "summary": t.summary,
+            } for t in transcripts
+        ],
         "events": [
             {
                 "agent": e.agent,
@@ -171,7 +527,7 @@ def upload_transcript(eng_id):
     user_id = session.get('user_id')
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     data = request.json
     raw_text = data.get('raw_text')
     if not raw_text:
@@ -181,109 +537,56 @@ def upload_transcript(eng_id):
     if not eng:
         return jsonify({"error": "Engagement not found"}), 404
 
-    from agents import generate_brief
+    if eng.is_processing:
+        return jsonify({"error": "This engagement is already being processed"}), 409
 
+    # awaiting_transcript: first client-meeting transcript, generates the brief.
+    # brief_ready: a brief already exists but the producer hasn't yet moved to the
+    #   proposal stage — another client-meeting transcript here *refines* the brief
+    #   (multi-round intake) rather than jumping to the proposal.
+    # awaiting_review_transcript: the producer explicitly advanced past the brief —
+    #   this transcript is the review meeting and generates the proposal.
     if eng.status == 'awaiting_transcript':
-        # Agent 1 Flow
-        transcript = Transcript(engagement_id=eng_id, kind='client_meeting', raw_text=raw_text, uploaded_by=user_id)
-        db_session.add(transcript)
-        db_session.flush()
+        kind, task = 'client_meeting', _process_brief_generation
+    elif eng.status == 'brief_ready':
+        kind, task = 'client_meeting', _process_brief_refinement
+    elif eng.status == 'awaiting_review_transcript':
+        kind, task = 'brief_review_meeting', _process_proposal_generation
+    else:
+        return jsonify({"error": "Invalid engagement state for upload"}), 400
 
-        try:
-            brief_json = generate_brief(raw_text, eng.client.name)
-            brief_md = brief_json.get('rendered_markdown', '')
-            
-            brief = Brief(
-                engagement_id=eng_id,
-                transcript_id=transcript.id,
-                structured_json=brief_json,
-                rendered_markdown=brief_md,
-                work_type=brief_json.get('work_type', 'unknown')
-            )
-            eng.status = 'brief_ready'
-            db_session.add(brief)
-            
-            # Create Agent Event
-            ev = AgentEvent(
-                engagement_id=eng_id,
-                agent='Brief Generator',
-                trigger='client_meeting_transcript_upload',
-                reasoning_summary='Processed initial client transcript to generate structured production brief.',
-                action='Created Brief',
-                tokens_used=0 # Ignored for this demo
-            )
-            db_session.add(ev)
-            db_session.commit()
-            
-            return jsonify({"message": "Brief generated successfully"})
-        except Exception as e:
-            db_session.rollback()
-            return jsonify({"error": f"Agent failed: {str(e)}"}), 500
+    # Commit the transcript insert in its own short transaction — the agent call
+    # that follows can take up to ~2 minutes, and SQLite only allows one writer
+    # at a time, so nothing should hold a write lock open for that whole span.
+    transcript = Transcript(engagement_id=eng_id, kind=kind, raw_text=raw_text, uploaded_by=user_id)
+    db_session.add(transcript)
+    eng.is_processing = True
+    eng.processing_error = None
+    db_session.commit()
 
-    elif eng.status == 'awaiting_review_transcript' or eng.status == 'brief_ready':
-        # Agent 2 Flow
-        transcript = Transcript(engagement_id=eng_id, kind='brief_review_meeting', raw_text=raw_text, uploaded_by=user_id)
-        db_session.add(transcript)
-        db_session.flush()
+    _executor.submit(task, eng_id, transcript.id)
 
-        brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
-        if not brief:
-            db_session.rollback()
-            return jsonify({"error": "No brief found for this engagement"}), 400
+    return jsonify({"processing": True}), 202
 
-        from models import PastProject, RateCardItem
-        from agents import generate_proposal
 
-        past_projects = db_session.query(PastProject).limit(3).all()
-        rate_card = db_session.query(RateCardItem).all()
+@app.route('/api/engagements/<int:eng_id>/advance', methods=['POST'])
+def advance_engagement(eng_id):
+    """Explicit producer action to move a refinable brief into the proposal stage —
+    what makes the 'awaiting_review_transcript' status (previously declared but never
+    set) real: brief_ready allows more intake transcripts until this is called."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
 
-        try:
-            proposal_json = generate_proposal(raw_text, brief, eng.client.name, past_projects, rate_card)
-            proposal_md = proposal_json.get('rendered_markdown', '')
-            extracted_signals = proposal_json.get('extracted_signals', '')
-            
-            proposal = Proposal(
-                engagement_id=eng_id,
-                brief_id=brief.id,
-                review_transcript_id=transcript.id,
-                structured_json=proposal_json,
-                rendered_markdown=proposal_md,
-                pricing_line_items=proposal_json.get('pricing', []),
-                status='draft'
-            )
-            eng.status = 'proposal_ready'
-            db_session.add(proposal)
-            
-            # Create Agent Event for Proposal Generation
-            ev = AgentEvent(
-                engagement_id=eng_id,
-                agent='Proposal Generator',
-                trigger='review_meeting_transcript_upload',
-                reasoning_summary='Combined brief, review notes, rate card, and past projects to draft a full client proposal.',
-                action='Created Proposal',
-                tokens_used=0
-            )
-            db_session.add(ev)
+    eng = db_session.query(Engagement).get(eng_id)
+    if not eng:
+        return jsonify({"error": "Engagement not found"}), 404
+    if eng.status != 'brief_ready':
+        return jsonify({"error": "Engagement is not ready to advance to the proposal stage"}), 400
 
-            # Create Agent Event for Extracted Signals (B1)
-            ev_signals = AgentEvent(
-                engagement_id=eng_id,
-                agent='Signal Extractor',
-                trigger='review_meeting_transcript_upload',
-                reasoning_summary=extracted_signals,
-                action='Extracted Meeting Signals',
-                tokens_used=0
-            )
-            db_session.add(ev_signals)
-            
-            db_session.commit()
-            
-            return jsonify({"message": "Proposal generated successfully"})
-        except Exception as e:
-            db_session.rollback()
-            return jsonify({"error": f"Agent 2 failed: {str(e)}"}), 500
-
-    return jsonify({"error": "Invalid engagement state for upload"}), 400
+    eng.status = 'awaiting_review_transcript'
+    db_session.commit()
+    return jsonify({"status": eng.status})
 
 @app.route('/api/engagements/<int:eng_id>/proposals/review', methods=['POST'])
 def review_proposal(eng_id):
@@ -320,60 +623,19 @@ def review_proposal(eng_id):
         return jsonify({"message": "Proposal approved"})
         
     elif action == 'send_back':
-        # Re-run Agent 2 with notes
-        from models import PastProject, RateCardItem
-        from agents import generate_proposal
-        
-        brief = db_session.query(Brief).filter_by(engagement_id=eng_id).order_by(Brief.id.desc()).first()
-        transcript = db_session.query(Transcript).get(proposal.review_transcript_id)
-        
-        past_projects = db_session.query(PastProject).limit(3).all()
-        rate_card = db_session.query(RateCardItem).all()
-        
-        try:
-            proposal_json = generate_proposal(transcript.raw_text, brief, eng.client.name, past_projects, rate_card, additional_notes=notes)
-            proposal_md = proposal_json.get('rendered_markdown', '')
-            extracted_signals = proposal_json.get('extracted_signals', '')
-            
-            new_proposal = Proposal(
-                engagement_id=eng_id,
-                brief_id=brief.id,
-                review_transcript_id=transcript.id,
-                structured_json=proposal_json,
-                rendered_markdown=proposal_md,
-                pricing_line_items=proposal_json.get('pricing', []),
-                status='in_review',
-                version=proposal.version + 1
-            )
-            eng.status = 'in_review'
-            db_session.add(new_proposal)
-            
-            ev = AgentEvent(
-                engagement_id=eng_id,
-                agent='Proposal Generator',
-                trigger='manager_send_back',
-                reasoning_summary=f'Regenerated proposal incorporating manager feedback: {notes}',
-                action='Regenerated Proposal',
-                tokens_used=0
-            )
-            db_session.add(ev)
+        if not notes.strip():
+            return jsonify({"error": "Notes describing the requested changes are required"}), 400
 
-            ev_signals = AgentEvent(
-                engagement_id=eng_id,
-                agent='Signal Extractor',
-                trigger='manager_send_back',
-                reasoning_summary=extracted_signals,
-                action='Extracted Meeting Signals',
-                tokens_used=0
-            )
-            db_session.add(ev_signals)
+        if eng.is_processing:
+            return jsonify({"error": "This engagement is already being processed"}), 409
 
-            db_session.commit()
-            
-            return jsonify({"message": "Proposal regenerated with notes"})
-        except Exception as e:
-            db_session.rollback()
-            return jsonify({"error": f"Agent 2 failed on regeneration: {str(e)}"}), 500
+        eng.is_processing = True
+        eng.processing_error = None
+        db_session.commit()
+
+        _executor.submit(_process_proposal_revision, eng_id, proposal.id, notes)
+
+        return jsonify({"processing": True}), 202
 
     return jsonify({"error": "Invalid action"}), 400
 
@@ -420,6 +682,9 @@ def _snippet(text, length=90):
 
 @app.route('/api/analytics', methods=['GET'])
 def get_analytics():
+    # Dashboard.jsx already consumes a slice of this (turnaround, recent_activity) for
+    # every role — only the dedicated Analytics page (funnel/revenue breakdown) is
+    # gated to Admin, and that's enforced at the frontend route/nav level, not here.
     engagements = db_session.query(Engagement).all()
     clients = db_session.query(Client).all()
     briefs = db_session.query(Brief).all()
@@ -542,7 +807,7 @@ def search():
     results = {}
 
     for eng in db_session.query(Engagement).join(Client).filter(Client.name.ilike(like)).all():
-        results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": eng.status, "match": "Client name", "preview": None}
+        results[eng.id] = {"id": eng.id, "client_id": eng.client_id, "client_name": eng.client.name, "status": eng.status, "match": "Client name", "preview": None}
 
     for b in db_session.query(Brief).filter(Brief.rendered_markdown.ilike(like)).all():
         if b.engagement_id not in results:
@@ -552,7 +817,7 @@ def search():
                 work_type = (data.get('work_type') or '').replace('-', ' ').replace('_', ' ')
                 objective = (data.get('objectives') or [None])[0]
                 preview = ' · '.join(p for p in [work_type.title() if work_type else None, _snippet(objective, 70) if objective else None] if p)
-                results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": eng.status, "match": "Production brief", "preview": preview or None}
+                results[eng.id] = {"id": eng.id, "client_id": eng.client_id, "client_name": eng.client.name, "status": eng.status, "match": "Production brief", "preview": preview or None}
 
     # Match on rendered markdown OR the pricing line items directly (pricing predates the
     # markdown including a pricing table, and JSON columns don't reliably ilike() on their own).
@@ -570,7 +835,7 @@ def search():
                 total = _format_kes(_line_item_total(latest.pricing_line_items))
                 approach = _snippet((latest.structured_json or {}).get('approach'), 70)
                 preview = ' · '.join(x for x in [total, approach] if x)
-                results[eng.id] = {"id": eng.id, "client_name": eng.client.name, "status": latest.status, "match": "Client proposal", "preview": preview or None}
+                results[eng.id] = {"id": eng.id, "client_id": eng.client_id, "client_name": eng.client.name, "status": latest.status, "match": "Client proposal", "preview": preview or None}
 
     return jsonify(list(results.values())[:10])
 

@@ -9,8 +9,9 @@ import { stageMeta, formatId, timeAgo } from '../lib/engagements';
 
 const API = 'http://localhost:5000/api';
 
-// Stage 2's transcript box is open in both of these backend states.
-const REVIEW_UPLOAD_STATUSES = ['brief_ready', 'awaiting_review_transcript'];
+// Stage 2's transcript box only opens once the producer explicitly advances past the
+// brief — brief_ready allows more intake transcripts (refining the brief) instead.
+const REVIEW_UPLOAD_STATUSES = ['awaiting_review_transcript'];
 const APPROVAL_STATUSES = ['proposal_ready', 'in_review'];
 
 // Document previews mirror the PDF export exactly (same accent colors, same
@@ -238,6 +239,39 @@ function buildStages(engagement) {
   ];
 }
 
+// Recap of what actually happened in a specific meeting — distinct from the
+// document (brief/proposal) that meeting produced. Duration/date are only ever
+// shown when the agent found them explicitly stated in the transcript; a missing
+// meeting_date falls back to the upload timestamp, which is real (not a guess).
+function MeetingSummaryCard({ transcript }) {
+  if (!transcript) return null;
+  const hasContent = transcript.summary || transcript.duration_minutes != null || transcript.meeting_date || (transcript.attendees && transcript.attendees.length > 0);
+  if (!hasContent) return null;
+
+  return (
+    <div className="mb-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#262626]">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#6e6e67] mb-1.5">
+        <FileText size={11} />
+        Meeting Summary
+      </div>
+      {transcript.summary && (
+        <p className="text-xs text-[#a3a39c] leading-relaxed mb-2">{transcript.summary}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] text-[#6e6e67]">
+        <span className="font-mono">{transcript.meeting_date || `Recorded ${timeAgo(transcript.uploaded_at)}`}</span>
+        {transcript.duration_minutes != null && <span className="font-mono">{transcript.duration_minutes} min</span>}
+        {transcript.attendees && transcript.attendees.length > 0 && (
+          <span className="flex flex-wrap gap-1">
+            {transcript.attendees.map((a, i) => (
+              <span key={i} className="px-1.5 py-0.5 rounded bg-[#242424] text-[#8a8a83]">{a}</span>
+            ))}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TranscriptDropArea({ stage, transcript, setTranscript, busy, onGenerate, error }) {
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef(null);
@@ -329,6 +363,13 @@ export default function EngagementDetail() {
   const [reviewError, setReviewError] = useState('');
   const [revisionMessage, setRevisionMessage] = useState('');
 
+  const [showRefineBox, setShowRefineBox] = useState(false);
+  const [isAdvancing, setIsAdvancing] = useState(false);
+  const [advanceError, setAdvanceError] = useState('');
+  const [isStartingNextRound, setIsStartingNextRound] = useState(false);
+
+  const pollRef = useRef(null);
+
   const fetchEngagement = useCallback(async () => {
     try {
       const res = await fetch(`${API}/engagements/${id}`, { credentials: 'include' });
@@ -336,12 +377,58 @@ export default function EngagementDetail() {
       setEngagement(data);
       // Default the document panel to the furthest artifact along the pipeline.
       setActiveDoc(prev => prev ?? (data.proposal ? 'proposal' : data.brief ? 'brief' : null));
+      return data;
     } catch (err) {
       console.error(err);
+      return null;
     }
   }, [id]);
 
-  useEffect(() => { fetchEngagement(); }, [fetchEngagement]);
+  // Agent calls now run in a background thread on the backend — the upload/review
+  // POSTs return almost immediately (202 processing), so completion is detected by
+  // polling the engagement until `is_processing` clears, rather than awaiting the
+  // original request.
+  const pollUntilDone = useCallback((onDone) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      const data = await fetchEngagement();
+      if (data && !data.is_processing) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        onDone(data);
+      }
+    }, 2000);
+  }, [fetchEngagement]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // If the page loads (or reloads) mid-processing — e.g. the producer refreshed
+  // during a long agent call — resume the busy UI and polling instead of showing
+  // a stale idle state.
+  useEffect(() => {
+    fetchEngagement().then(data => {
+      if (!data?.is_processing) return;
+      const stageId = data.status === 'awaiting_transcript' ? 'brief'
+        : (data.status === 'brief_ready' || data.status === 'awaiting_review_transcript') ? 'proposal'
+        : 'approval';
+      if (stageId === 'approval') {
+        setIsReviewing(true);
+        setIsRevising(true);
+      } else {
+        setGeneratingStage(stageId);
+      }
+      pollUntilDone(finalData => {
+        setGeneratingStage(null);
+        setIsReviewing(false);
+        setIsRevising(false);
+        if (finalData.processing_error) {
+          if (stageId === 'approval') setReviewError(finalData.processing_error);
+          else setGenerateError(finalData.processing_error);
+        }
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   const handleGenerate = async (stageId) => {
     if (!transcript.trim()) return;
@@ -355,20 +442,65 @@ export default function EngagementDetail() {
         body: JSON.stringify({ raw_text: transcript }),
         credentials: 'include',
       });
-      if (res.ok) {
+      if (res.status === 202) {
         setTranscript('');
         setActiveDoc(stageId);
         setShowDoc(true);
-        await fetchEngagement();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        setGenerateError(err.error || 'Generation failed. Please try again.');
+        pollUntilDone(data => {
+          setGeneratingStage(null);
+          if (data.processing_error) setGenerateError(data.processing_error);
+          else if (stageId === 'brief') setShowRefineBox(false);
+        });
+        return;
       }
+      const err = await res.json().catch(() => ({}));
+      setGenerateError(err.error || 'Generation failed. Please try again.');
     } catch (err) {
       console.error(err);
       setGenerateError('Connection failed. Is the backend running?');
     }
     setGeneratingStage(null);
+  };
+
+  const handleAdvanceToProposal = async () => {
+    setIsAdvancing(true);
+    setAdvanceError('');
+    try {
+      const res = await fetch(`${API}/engagements/${id}/advance`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        await fetchEngagement();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setAdvanceError(err.error || 'Could not advance to the proposal stage.');
+      }
+    } catch (err) {
+      console.error(err);
+      setAdvanceError('Connection failed. Is the backend running?');
+    }
+    setIsAdvancing(false);
+  };
+
+  const handleStartNextRound = async () => {
+    setIsStartingNextRound(true);
+    try {
+      const res = await fetch(`${API}/engagements`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: engagement.client_id }),
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const next = await res.json();
+        navigate(`/engagements/${next.id}`);
+        return;
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    setIsStartingNextRound(false);
   };
 
   const handleApprove = async () => {
@@ -412,16 +544,23 @@ export default function EngagementDetail() {
         body: JSON.stringify({ action: 'send_back', notes: request }),
         credentials: 'include',
       });
-      if (res.ok) {
-        setRevisionMessage(`AI revision applied: ${request}`);
-        setAmNote('');
+      if (res.status === 202) {
         setActiveDoc('proposal');
         setShowDoc(true);
-        await fetchEngagement();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        setReviewError(err.error || 'Revision failed.');
+        pollUntilDone(data => {
+          setIsReviewing(false);
+          setIsRevising(false);
+          if (data.processing_error) {
+            setReviewError(data.processing_error);
+          } else {
+            setRevisionMessage(`AI revision applied: ${request}`);
+            setAmNote('');
+          }
+        });
+        return;
       }
+      const err = await res.json().catch(() => ({}));
+      setReviewError(err.error || 'Revision failed.');
     } catch (err) {
       console.error(err);
       setReviewError('Connection failed. Is the backend running?');
@@ -472,8 +611,12 @@ export default function EngagementDetail() {
 
   const stages = buildStages(engagement);
   const meta = stageMeta(engagement.status);
+  const STAGE_TRANSCRIPT_KIND = { brief: 'client_meeting', proposal: 'brief_review_meeting' };
+  const transcriptsForStage = stageId =>
+    (engagement.transcripts || []).filter(t => t.kind === STAGE_TRANSCRIPT_KIND[stageId]);
   const hasAnyDoc = Boolean(engagement.brief || engagement.proposal);
   const events = engagement.events || [];
+  const carryForward = engagement.carry_forward || [];
 
   return (
     <div className="flex h-full">
@@ -496,7 +639,11 @@ export default function EngagementDetail() {
               {meta.label}
             </span>
           </div>
-          <h1 className="font-serif text-[#f7f5ef] text-2xl mb-1">{engagement.client_name}</h1>
+          <h1 className="font-serif text-[#f7f5ef] text-2xl mb-1">
+            <button onClick={() => navigate(`/clients/${engagement.client_id}`)} className="hover:text-[#e8c34a] transition-colors text-left">
+              {engagement.client_name}
+            </button>
+          </h1>
           <p className="text-sm text-[#a3a39c]">
             {engagement.client_industry ? `${engagement.client_industry} · ` : ''}Engagement {formatId(engagement.id)}
           </p>
@@ -561,34 +708,73 @@ export default function EngagementDetail() {
                 {stage.status !== 'pending' && stage.id !== 'approval' && (
                   <div className="px-5 pb-5 border-t border-[#262626] pt-4">
                     {stage.status === 'complete' ? (
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1 flex items-center gap-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#262626]">
-                          <div className="w-8 h-8 rounded-md bg-[#10b981]/10 border border-[#10b981]/20 flex items-center justify-center">
-                            <FileText size={14} className="text-[#10b981]" />
+                      <div>
+                        {transcriptsForStage(stage.id).map(t => (
+                          <MeetingSummaryCard key={t.id} transcript={t} />
+                        ))}
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1 flex items-center gap-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#262626]">
+                            <div className="w-8 h-8 rounded-md bg-[#10b981]/10 border border-[#10b981]/20 flex items-center justify-center">
+                              <FileText size={14} className="text-[#10b981]" />
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-[#f7f5ef]">{stage.docType}</p>
+                              <p className="text-[10px] text-[#6e6e67] font-mono">Generated by {stage.agent}</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="text-xs font-medium text-[#f7f5ef]">{stage.docType}</p>
-                            <p className="text-[10px] text-[#6e6e67] font-mono">Generated by {stage.agent}</p>
-                          </div>
+                          <button
+                            onClick={() => { setShowDoc(true); setActiveDoc(stage.id); }}
+                            className="flex items-center gap-1.5 px-3 py-2 text-xs text-[#e8c34a] border border-[#c9971f]/30 rounded-lg hover:bg-[#c9971f]/10 transition-colors"
+                          >
+                            <Eye size={13} />
+                            View
+                          </button>
+                          <button
+                            onClick={() => downloadPDF(stage.id)}
+                            disabled={(stage.id === 'proposal' && !proposalApproved) || isDownloading === stage.id}
+                            title={stage.id === 'proposal' && !proposalApproved ? 'Approve the proposal before downloading' : 'Download PDF'}
+                            className="flex items-center gap-1.5 px-3 py-2 text-xs text-[#a3a39c] border border-[#262626] rounded-lg hover:border-[#333333] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            <Download size={13} />
+                            {isDownloading === stage.id ? 'Preparing…' : 'Download'}
+                          </button>
                         </div>
-                        <button
-                          onClick={() => { setShowDoc(true); setActiveDoc(stage.id); }}
-                          className="flex items-center gap-1.5 px-3 py-2 text-xs text-[#e8c34a] border border-[#c9971f]/30 rounded-lg hover:bg-[#c9971f]/10 transition-colors"
-                        >
-                          <Eye size={13} />
-                          View
-                        </button>
-                        <button
-                          onClick={() => downloadPDF(stage.id)}
-                          disabled={(stage.id === 'proposal' && !proposalApproved) || isDownloading === stage.id}
-                          title={stage.id === 'proposal' && !proposalApproved ? 'Approve the proposal before downloading' : 'Download PDF'}
-                          className="flex items-center gap-1.5 px-3 py-2 text-xs text-[#a3a39c] border border-[#262626] rounded-lg hover:border-[#333333] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
-                        >
-                          <Download size={13} />
-                          {isDownloading === stage.id ? 'Preparing…' : 'Download'}
-                        </button>
+
+                        {/* A brief stays refinable — more than one intake meeting is
+                            common — until the producer explicitly moves on. */}
+                        {stage.id === 'brief' && engagement.status === 'brief_ready' && (
+                          <div className="mt-3 pt-3 border-t border-[#262626]">
+                            {showRefineBox ? (
+                              <TranscriptDropArea
+                                stage={{ ...stage, agent: 'Brief Generator', docType: 'Production Brief' }}
+                                transcript={transcript}
+                                setTranscript={setTranscript}
+                                busy={generatingStage === 'brief'}
+                                onGenerate={() => handleGenerate('brief')}
+                                error={generateError}
+                              />
+                            ) : (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => setShowRefineBox(true)}
+                                  className="flex-1 py-2 rounded-lg border border-[#262626] text-xs text-[#a3a39c] hover:border-[#333333] hover:text-[#f7f5ef] transition-colors"
+                                >
+                                  + Add Another Meeting
+                                </button>
+                                <button
+                                  onClick={handleAdvanceToProposal}
+                                  disabled={isAdvancing}
+                                  className="flex-1 py-2 rounded-lg bg-[#c9971f] hover:bg-[#a67a17] text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
+                                >
+                                  {isAdvancing ? 'Advancing…' : 'Move to Proposal Stage →'}
+                                </button>
+                              </div>
+                            )}
+                            {advanceError && <p role="alert" className="mt-1.5 text-xs text-rose-600">{advanceError}</p>}
+                          </div>
+                        )}
                       </div>
-                    ) : !isAccountManager ? (
+                    ) : (
                       <TranscriptDropArea
                         stage={stage}
                         transcript={transcript}
@@ -597,11 +783,6 @@ export default function EngagementDetail() {
                         onGenerate={() => handleGenerate(stage.id)}
                         error={generateError}
                       />
-                    ) : (
-                      <div className="flex items-start gap-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#262626]">
-                        <AlertCircle size={14} className="text-[#a3a39c] shrink-0 mt-0.5" />
-                        <p className="text-xs text-[#a3a39c]">The production team generates the {stage.docType.toLowerCase()} before it is sent to the Account Manager for review.</p>
-                      </div>
                     )}
                   </div>
                 )}
@@ -610,12 +791,22 @@ export default function EngagementDetail() {
                 {stage.id === 'approval' && stage.status !== 'pending' && (
                   <div className="px-5 pb-5 border-t border-[#262626] pt-4">
                     {stage.status === 'complete' ? (
-                      <div className="flex items-center gap-3 p-4 rounded-lg bg-[#10b981]/10 border border-[#10b981]/20">
-                        <CheckCircle2 size={18} className="text-[#10b981] shrink-0" />
-                        <div>
-                          <p className="text-sm font-medium text-[#10b981]">Proposal Approved</p>
-                          <p className="text-xs text-[#6e6e67]">Ready to send to the client — download the PDF from the proposal panel.</p>
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-center gap-3 p-4 rounded-lg bg-[#10b981]/10 border border-[#10b981]/20">
+                          <CheckCircle2 size={18} className="text-[#10b981] shrink-0" />
+                          <div>
+                            <p className="text-sm font-medium text-[#10b981]">Proposal Approved</p>
+                            <p className="text-xs text-[#6e6e67]">Ready to send to the client — download the PDF from the proposal panel.</p>
+                          </div>
                         </div>
+                        <button
+                          onClick={handleStartNextRound}
+                          disabled={isStartingNextRound}
+                          className="flex items-center justify-center gap-1.5 py-2.5 rounded-lg border border-[#c9971f]/40 text-[#a16207] hover:bg-[#c9971f]/10 text-sm font-medium transition-colors disabled:cursor-wait disabled:opacity-60"
+                        >
+                          <Zap size={13} />
+                          {isStartingNextRound ? 'Starting…' : `Start Next Round for ${engagement.client_name}`}
+                        </button>
                       </div>
                     ) : !isAccountManager ? (
                       <div className="flex items-start gap-3 p-3 rounded-lg bg-[#f59e0b]/10 border border-[#f59e0b]/20">
@@ -667,6 +858,29 @@ export default function EngagementDetail() {
             </div>
           ))}
         </div>
+
+        {/* Carry into next meeting — open items pulled forward from the brief, the
+            proposal, and the review-meeting signal extraction, deduped, so nothing
+            gets lost between stages. */}
+        {carryForward.length > 0 && (
+          <div className="mt-8 rounded-xl" style={{ background: '#141414', border: '1px solid #242424' }}>
+            <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: '1px solid #242424' }}>
+              <HelpCircle size={14} className="text-[#8a8a83]" />
+              <span className="text-[14px] font-semibold text-[#f2f0e8]">Carry Into Next Meeting</span>
+            </div>
+            <div className="px-5 py-3 flex flex-col">
+              {carryForward.map((item, i) => (
+                <div key={i} className="flex gap-3 py-3" style={i < carryForward.length - 1 ? { borderBottom: '1px solid #191919' } : {}}>
+                  <div className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-[#f59e0b]" />
+                  <div className="min-w-0">
+                    <p className="text-[12px] text-[#d6d4c9]">{item.text}</p>
+                    <p className="text-[10px] text-[#5c5c55] font-mono mt-0.5">{item.source}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Activity log */}
         {events.length > 0 && (
