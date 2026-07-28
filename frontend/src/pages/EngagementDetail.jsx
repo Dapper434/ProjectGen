@@ -4,9 +4,12 @@ import {
   ChevronRight, Upload, Zap, FileText, CheckCircle2, Clock,
   RotateCcw, Eye, Download, X, AlertCircle,
   Target, Users, Package, Calendar, Wallet, Briefcase, AlertTriangle, HelpCircle,
-  BookOpen, ChevronDown, Trash2,
+  BookOpen, ChevronDown, Trash2, Copy, Check, Mail, Sparkles,
 } from 'lucide-react';
 import { stageMeta, formatId, timeAgo } from '../lib/engagements';
+import { useConfig } from '../lib/config.jsx';
+import AuthoritativePanel from '../components/AuthoritativePanel';
+import MicCaptureButton from '../components/MicCaptureButton';
 
 const API = '/api';
 
@@ -549,8 +552,10 @@ function ReferenceDocumentsCard({ engagementId, status }) {
   );
 }
 
-function TranscriptDropArea({ stage, transcript, setTranscript, busy, onGenerate, error }) {
+function TranscriptDropArea({ stage, transcript, setTranscript, busy, onGenerate, error, engagementId }) {
+  const { flags } = useConfig();
   const [dragging, setDragging] = useState(false);
+  const [dictationError, setDictationError] = useState('');
   const fileInputRef = useRef(null);
 
   const readFile = useCallback((file) => {
@@ -596,9 +601,19 @@ function TranscriptDropArea({ stage, transcript, setTranscript, busy, onGenerate
       </div>
       <div className="flex items-center gap-2">
         <div className="flex-1 h-px bg-[#262626]" />
-        <span className="text-[10px] text-[#6e6e67]">or paste directly</span>
+        <span className="text-[10px] text-[#6e6e67]">or dictate / paste directly</span>
         <div className="flex-1 h-px bg-[#262626]" />
       </div>
+      {flags.voice && (
+        <MicCaptureButton
+          engagementId={engagementId}
+          // Same setter the drop and paste paths use — dictation is just another
+          // way of filling this textarea.
+          onText={text => setTranscript(prev => (prev ? `${prev} ` : '') + text)}
+          onError={setDictationError}
+        />
+      )}
+      {dictationError && <p role="alert" className="text-xs text-amber-500">{dictationError}</p>}
       <textarea
         rows={4}
         value={transcript}
@@ -619,13 +634,130 @@ function TranscriptDropArea({ stage, transcript, setTranscript, busy, onGenerate
   );
 }
 
+// Producer-facing affordance for WP-8's zero-click path: pasting this tag into a
+// calendar invite title makes the Fathom transcript attach to *this* engagement,
+// which also disambiguates a client that has several open engagements.
+function EngTagHint({ tag }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(tag);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 mt-2.5 flex-wrap">
+      <code className="text-[11px] font-mono text-[#e8c34a] bg-[#c9971f]/10 border border-[#c9971f]/25 px-2 py-1 rounded">
+        {tag}
+      </code>
+      <button
+        onClick={copy}
+        aria-label={`Copy ${tag} to clipboard`}
+        className="flex items-center gap-1 text-[11px] text-[#a3a39c] hover:text-[#e8c34a] transition-colors"
+      >
+        {copied ? <Check size={11} /> : <Copy size={11} />}
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+      <span aria-live="polite" className="sr-only">{copied ? 'Copied to clipboard' : ''}</span>
+      <span className="text-[11px] text-[#6e6e67]">
+        Paste this into the calendar invite title and the transcript attaches itself.
+      </span>
+    </div>
+  );
+}
+
+
+// WP-12: the same approval gate as the PDF download, plus the one thing the
+// backend cannot supply — a human confirming the address before it leaves.
+function SendProposalModal({ engagement, onClose, onSent }) {
+  const [to, setTo] = useState(engagement.client_contact_email || '');
+  const [contactName, setContactName] = useState(engagement.client_contact_name || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  async function send() {
+    if (!to.trim()) { setError('Enter the client contact email.'); return; }
+    setBusy(true); setError('');
+    try {
+      const res = await fetch(`${API}/engagements/${engagement.id}/proposal/send-email`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim(), contact_name: contactName.trim() || null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(data.error || 'Could not send the proposal.'); return; }
+      setResult(data);
+      setTimeout(onSent, 1800);
+    } catch {
+      setError('Connection failed.');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" onClick={onClose}>
+      <div role="dialog" aria-label="Send proposal by email" onClick={e => e.stopPropagation()}
+        className="w-full max-w-md rounded-xl overflow-hidden"
+        style={{ background: '#141414', border: '1px solid #242424' }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #242424' }}>
+          <span className="text-[14px] font-semibold text-[#f2f0e8]">Send proposal</span>
+          <button onClick={onClose} aria-label="Close" className="text-[#8a8a83] hover:text-[#f7f5ef]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="px-5 py-4 flex flex-col gap-3">
+          {result ? (
+            <p className="text-[13px] text-[#10b981]" aria-live="polite">
+              Sent to {result.to} via {result.driver_label}. {result.detail}
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="em-to" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">TO</label>
+                <input id="em-to" type="email" value={to} onChange={e => setTo(e.target.value)}
+                  className="rounded-lg px-3 py-2 text-[12px] text-[#d6d4c9] bg-[#0e0e0e]"
+                  style={{ border: '1px solid #262626' }} />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="em-name" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">
+                  CONTACT NAME (OPTIONAL)
+                </label>
+                <input id="em-name" value={contactName} onChange={e => setContactName(e.target.value)}
+                  className="rounded-lg px-3 py-2 text-[12px] text-[#d6d4c9] bg-[#0e0e0e]"
+                  style={{ border: '1px solid #262626' }} />
+              </div>
+              <p className="text-[11px] text-[#8a8a83]">
+                The approved proposal PDF is attached automatically.
+              </p>
+              {error && <p role="alert" className="text-xs text-rose-500">{error}</p>}
+              <button onClick={send} disabled={busy}
+                className="self-start flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50"
+                style={{ background: 'linear-gradient(135deg, #c9971f, #a67a17)' }}>
+                <Mail size={13} /> {busy ? 'Sending…' : 'Send'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function EngagementDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useOutletContext();
+  const { flags } = useConfig();
   const isAccountManager = user?.role === 'Account Manager';
+  const canEditAuthData = user?.role === 'Account Manager' || user?.role === 'Admin';
 
   const [engagement, setEngagement] = useState(null);
+  const [showEmail, setShowEmail] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [generatingStage, setGeneratingStage] = useState(null); // 'brief' | 'proposal' | null
   const [generateError, setGenerateError] = useState('');
@@ -955,6 +1087,15 @@ export default function EngagementDetail() {
           {engagement.client_notes && (
             <p className="text-xs text-[#6e6e67] mt-1 max-w-xl">{engagement.client_notes}</p>
           )}
+          {engagement.eng_tag && <EngTagHint tag={engagement.eng_tag} />}
+          {flags.talent && (
+            <button
+              onClick={() => navigate(`/engagements/${engagement.id}/casting`)}
+              className="mt-2.5 flex items-center gap-1.5 text-[12px] text-[#a3a39c] hover:text-[#e8c34a] transition-colors"
+            >
+              <Sparkles size={12} /> Casting &amp; crew
+            </button>
+          )}
         </div>
 
         <ReferenceDocumentsCard engagementId={engagement.id} status={engagement.status} />
@@ -1045,6 +1186,19 @@ export default function EngagementDetail() {
                             <Download size={13} />
                             {isDownloading === stage.id ? 'Preparing…' : 'Download'}
                           </button>
+                          {/* Same approval gate as the PDF download — deliberately
+                              not a new rule. */}
+                          {stage.id === 'proposal' && flags.email && isAccountManager && (
+                            <button
+                              onClick={() => setShowEmail(true)}
+                              disabled={!proposalApproved}
+                              title={proposalApproved ? 'Email this proposal to the client' : 'Approve the proposal before emailing'}
+                              className="flex items-center gap-1.5 px-3 py-2 text-xs text-[#a3a39c] border border-[#262626] rounded-lg hover:border-[#333333] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+                            >
+                              <Mail size={13} />
+                              Send
+                            </button>
+                          )}
                         </div>
 
                         <CompletenessBadge engagementId={engagement.id} docType={stage.id} refreshKey={stage.id === 'brief' ? engagement.brief?.id : engagement.proposal?.id} />
@@ -1061,6 +1215,7 @@ export default function EngagementDetail() {
                                 busy={generatingStage === 'brief'}
                                 onGenerate={() => handleGenerate('brief')}
                                 error={generateError}
+                                engagementId={engagement.id}
                               />
                             ) : (
                               <div className="flex gap-2">
@@ -1091,6 +1246,7 @@ export default function EngagementDetail() {
                         busy={generatingStage === stage.id}
                         onGenerate={() => handleGenerate(stage.id)}
                         error={generateError}
+                        engagementId={engagement.id}
                       />
                     )}
                   </div>
@@ -1262,7 +1418,28 @@ export default function EngagementDetail() {
             </div>
           </div>
         )}
+
+        {flags.auth_data && (
+          <div className="mt-8">
+            <AuthoritativePanel
+              title="Authoritative Data for This Engagement"
+              keys={['brand_voice', 'email_cover_note']}
+              engagementId={engagement.id}
+              editScopeType="client"
+              editScopeId={engagement.client_id}
+              canEdit={canEditAuthData}
+            />
+          </div>
+        )}
       </div>
+
+      {showEmail && (
+        <SendProposalModal
+          engagement={engagement}
+          onClose={() => setShowEmail(false)}
+          onSent={() => { setShowEmail(false); fetchEngagement(); }}
+        />
+      )}
 
       {/* Right: document preview — half the screen, since this is the PDF stand-in */}
       {hasAnyDoc && showDoc && (

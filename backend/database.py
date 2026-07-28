@@ -1,11 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-import os
+from config import Config
 
-# `or` (not `.get(key, default)`) so a blank value in .env — e.g. `DATABASE_URL=` left
-# empty after copying .env.example — falls back to the default instead of failing.
-DATABASE_URL = os.environ.get('DATABASE_URL') or 'sqlite:///factoryos.db'
+DATABASE_URL = Config.DATABASE_URL
 
 engine = create_engine(DATABASE_URL)
 db_session = scoped_session(sessionmaker(autocommit=False,

@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     // The app calls relative /api paths everywhere. In dev, proxy them to the
     // local Flask backend; in production, a Vercel rewrite (see vercel.json)
-    // proxies them to the Tailscale Funnel URL instead. Same-origin in both
+    // proxies them to the Cloudflare Tunnel URL instead. Same-origin in both
     // worlds — no CORS or cross-site cookie configuration needed.
     proxy: {
       '/api': 'http://localhost:5000',
