@@ -1,7 +1,8 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Layers, BarChart3, ClipboardCheck, Inbox, LogOut, Plus } from 'lucide-react';
+import { LayoutDashboard, Layers, BarChart3, ClipboardCheck, Inbox, LogOut, Plus, BookOpen, SlidersHorizontal, FlaskConical, AudioLines, Presentation as PresentationIcon, Users } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import SearchBar from './SearchBar';
+import { useConfig } from '../lib/config.jsx';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/dashboard' },
@@ -16,6 +17,7 @@ const adminNavItems = [
 
 export default function Layout() {
   const navigate = useNavigate();
+  const { flags } = useConfig();
   const [user, setUser] = useState(null);
   const [inboxCount, setInboxCount] = useState(0);
 
@@ -79,7 +81,19 @@ export default function Layout() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-2 flex flex-col gap-0.5">
-          {[...navItems, ...(user.role === 'Admin' ? adminNavItems : [])].map(({ icon: Icon, label, to }) => (
+          {[
+            ...navItems,
+            ...(flags.talent ? [{ icon: Users, label: 'Talent', to: '/talent' }] : []),
+            ...(flags.boardroom ? [{ icon: PresentationIcon, label: 'Boardroom', to: '/boardroom' }] : []),
+            ...(flags.recordings ? [{ icon: AudioLines, label: 'Recordings', to: '/recordings' }] : []),
+            ...(flags.auth_data ? [{ icon: BookOpen, label: 'Authoritative Data', to: '/authoritative' }] : []),
+            ...(flags.lab ? [
+              { icon: SlidersHorizontal, label: 'Providers', to: '/providers' },
+              { icon: FlaskConical, label: 'Lab · Agents', to: '/lab/agents' },
+              ...(flags.voice ? [{ icon: AudioLines, label: 'Lab · Speech', to: '/lab/transcription' }] : []),
+            ] : []),
+            ...(user.role === 'Admin' ? adminNavItems : []),
+          ].map(({ icon: Icon, label, to }) => (
             <NavLink
               key={to}
               to={to}

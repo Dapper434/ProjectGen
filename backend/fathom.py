@@ -21,7 +21,6 @@ Register the webhook (prints the secret to put in .env):
 import base64
 import hashlib
 import hmac
-import os
 import sys
 import time
 from datetime import datetime
@@ -38,7 +37,9 @@ def verify_signature(headers, body_bytes, secret=None, tolerance_seconds=300):
     configured — dev mode). Scheme: HMAC-SHA256 over "{id}.{timestamp}.{body}"
     keyed with the base64-decoded part of the secret after "whsec_", compared
     against each "v1,<base64sig>" entry in the webhook-signature header."""
-    secret = secret if secret is not None else os.environ.get('FATHOM_WEBHOOK_SECRET')
+    if secret is None:
+        from config import Config  # deferred: must resolve after load_dotenv(), not at module import
+        secret = Config.FATHOM_WEBHOOK_SECRET
     if not secret:
         return True
 
@@ -130,7 +131,8 @@ def parse_meeting_payload(data):
 # ---------------------------------------------------------------------------
 
 def _api_key():
-    key = os.environ.get('FATHOM_API_KEY')
+    from config import Config  # deferred: must resolve after load_dotenv(), not at module import
+    key = Config.FATHOM_API_KEY
     if not key:
         raise SystemExit("FATHOM_API_KEY is not set — add it to backend/.env (Fathom Settings -> API Access).")
     return key

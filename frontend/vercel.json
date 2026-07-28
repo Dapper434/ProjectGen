@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://YOUR-MACHINE.YOUR-TAILNET.ts.net/api/:path*"
+      "destination": "https://REPLACE-WITH-URL.trycloudflare.com/api/:path*"
     },
     { "source": "/:path*", "destination": "/index.html" }
   ]

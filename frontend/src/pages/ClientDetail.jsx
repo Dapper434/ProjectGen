@@ -1,13 +1,80 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { ChevronRight, Layers, TrendingUp, Clock, HelpCircle, ArrowUpRight, Plus } from 'lucide-react';
+import { useNavigate, useParams, useOutletContext } from 'react-router-dom';
+import { ChevronRight, Layers, TrendingUp, Clock, HelpCircle, ArrowUpRight, Plus, Mail } from 'lucide-react';
 import { stageMeta, clientColor, formatId, timeAgo, formatKes } from '../lib/engagements';
+import { useConfig } from '../lib/config.jsx';
+import AuthoritativePanel from '../components/AuthoritativePanel';
 
 const API = '/api';
+
+function ContactEmailField({ client, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [email, setEmail] = useState(client.contact_email || '');
+  const [name, setName] = useState(client.contact_name || '');
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await fetch(`${API}/clients/${client.id}`, {
+        method: 'PATCH', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_email: email.trim(), contact_name: name.trim() }),
+      });
+      setEditing(false);
+      onSaved?.();
+    } finally { setBusy(false); }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex gap-2 items-end flex-wrap mb-7">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="cd-email" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">CONTACT EMAIL</label>
+          <input id="cd-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+            className="rounded-lg px-3 py-1.5 text-[12px] text-[#d6d4c9] bg-[#0e0e0e]"
+            style={{ border: '1px solid #262626' }} />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="cd-name" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">CONTACT NAME</label>
+          <input id="cd-name" value={name} onChange={e => setName(e.target.value)}
+            className="rounded-lg px-3 py-1.5 text-[12px] text-[#d6d4c9] bg-[#0e0e0e]"
+            style={{ border: '1px solid #262626' }} />
+        </div>
+        <button onClick={save} disabled={busy}
+          className="px-3 py-1.5 rounded-lg text-white text-[12px] disabled:opacity-50"
+          style={{ background: 'linear-gradient(135deg, #c9971f, #a67a17)' }}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        <button onClick={() => setEditing(false)}
+          className="px-3 py-1.5 rounded-lg text-[12px] text-[#a3a39c]" style={{ border: '1px solid #333' }}>
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <p className="text-xs text-[#8a8a83] mb-7 flex items-center gap-2 flex-wrap">
+      <Mail size={11} className="text-[#5c5c55]" />
+      {client.contact_email
+        ? <span>{client.contact_email}{client.contact_name ? ` · ${client.contact_name}` : ''}</span>
+        : <span className="text-[#6e6e67]">No contact email — needed before a proposal can be emailed.</span>}
+      {canEdit && (
+        <button onClick={() => setEditing(true)} className="text-[#a3a39c] hover:text-[#e8c34a] transition-colors">
+          {client.contact_email ? 'Edit' : 'Add'}
+        </button>
+      )}
+    </p>
+  );
+}
 
 export default function ClientDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { flags } = useConfig();
+  const { user } = useOutletContext();
+  const canEditAuthData = user?.role === 'Account Manager' || user?.role === 'Admin';
   const [client, setClient] = useState(null);
   const [error, setError] = useState('');
 
@@ -73,8 +140,11 @@ export default function ClientDetail() {
       </div>
 
       {client.notes && (
-        <p className="text-xs text-[#6e6e67] mb-7 max-w-2xl">{client.notes}</p>
+        <p className="text-xs text-[#6e6e67] mb-4 max-w-2xl">{client.notes}</p>
       )}
+
+      {/* Contact email — required before a proposal can be emailed (WP-12). */}
+      <ContactEmailField client={client} canEdit={canEditAuthData} onSaved={fetchClient} />
 
       {/* Rollup stats */}
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-7">
@@ -160,6 +230,19 @@ export default function ClientDetail() {
           </div>
         )}
       </div>
+
+      {flags.auth_data && (
+        <div className="mt-7">
+          <AuthoritativePanel
+            title="Authoritative Data for This Client"
+            keys={['brand_voice', 'email_cover_note']}
+            clientId={client.id}
+            editScopeType="client"
+            editScopeId={client.id}
+            canEdit={canEditAuthData}
+          />
+        </div>
+      )}
     </div>
   );
 }

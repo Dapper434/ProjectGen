@@ -1,36 +1,18 @@
-import os
 import json
-import requests
 from pydantic import BaseModel, Field, ValidationError
 from typing import List, Optional
+from config import Config
 from models import Brief, Proposal, AgentEvent, PastProject, RateCardItem
 from database import db_session
 
-NIM_API_KEY = os.environ.get("NIM_API_KEY")
-NIM_MODEL = os.environ.get("NIM_MODEL")
+# Still read directly (not through the registry) because these gate *dummy mode*:
+# with no NIM key configured the agent functions return clearly-marked placeholder
+# content instead of calling anything. rag.py imports NIM_API_KEY for the same check.
+NIM_API_KEY = Config.NIM_API_KEY
 
-# --- Reasoning-effort presets for NIM's Nemotron reasoning models -----------
-# Nemotron-3-Super exposes a vLLM-native `chat_template_kwargs` field (sent directly
-# in the raw JSON body — this isn't an OpenAI-SDK `extra_body` wrapper, it's a real
-# top-level field on NIM's OpenAI-compatible endpoint) that controls how much of the
-# completion-token budget is spent "thinking" before the final JSON answer:
-#   - "off":  no reasoning tokens at all — fastest, best for pure extraction tasks
-#             that don't need multi-step deduction (reading a transcript and filling
-#             in known fields).
-#   - "low":  light reasoning — for tasks that need some judgment/arithmetic (pricing
-#             math against a rate card, merging conflicting signals) without paying
-#             for full deliberation.
-#   - "full": full reasoning — reserved as an escalation path when a fast attempt's
-#             output fails validation, rather than the default for every call.
-# NVIDIA's own docs recommend temperature=1.0/top_p=0.95 for this model regardless of
-# reasoning level (a different tuning than the old non-reasoning llama default this
-# code previously used), and a smaller max_tokens budget is safe now that the LLM no
-# longer also has to author a full duplicate rendered_markdown document (see below).
-_REASONING_PRESETS = {
-    "off":  {"chat_template_kwargs": {"enable_thinking": False}, "max_tokens": 4096},
-    "low":  {"chat_template_kwargs": {"enable_thinking": True, "low_effort": True}, "max_tokens": 8192},
-    "full": {"chat_template_kwargs": {"enable_thinking": True}, "max_tokens": 16384},
-}
+# The reasoning-effort presets that used to live here now belong to the NIM
+# driver (providers/llm/nim.py) — they are Nemotron-specific, and each driver
+# maps the shared "off | low | full" vocabulary onto its own knobs.
 
 
 class ProductionBriefSchema(BaseModel):
@@ -83,31 +65,18 @@ class ProposalSchema(BaseModel):
     action_items: List[str] = Field(default_factory=list)
 
 
-def call_nim_api(system_prompt: str, user_prompt: str, reasoning: str = "full") -> tuple[str, dict]:
-    preset = _REASONING_PRESETS[reasoning]
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {NIM_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": NIM_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "max_tokens": preset["max_tokens"],
-        "chat_template_kwargs": preset["chat_template_kwargs"],
-    }
+def call_nim_api(system_prompt: str, user_prompt: str, reasoning: str = "full", driver_override: str = None) -> tuple[str, dict]:
+    """Run a completion through whichever `agent_llm` driver is currently selected.
 
-    response = requests.post(url, headers=headers, json=payload, timeout=120)
-    response.raise_for_status()
-    data = response.json()
-    content = data['choices'][0]['message']['content']
-    usage = data.get('usage') or {}
-    return content, usage
+    Kept under its original name and signature so the five agent functions below
+    are unchanged, but it is no longer NIM-specific: the driver comes from the
+    provider registry, so the model behind briefs and proposals is switchable at
+    runtime (WP-2). NIM remains the registry's fallback, so behaviour with no
+    configuration is identical to before.
+    """
+    from providers import registry
+    driver = registry.get('agent_llm', override=driver_override)
+    return driver.complete(system_prompt, user_prompt, reasoning=reasoning)
 
 
 def _extract_json(raw_response: str) -> dict:
@@ -246,8 +215,7 @@ def render_proposal_markdown(data: dict, client_name: str) -> str:
 {open_questions_block}"""
 
 
-def generate_brief(transcript_text: str, client_name: str, client_history: str = "", reference_material: str = "") -> dict:
-    system_prompt = f"""You are a Production Brief Generator for a creative agency middleman platform. Your job is to turn a raw meeting notes summary (captured by an AI notetaker during the client's intake call) into a structured, professional Production Brief that a creative team can act on.
+DEFAULT_BRIEF_GENERATION_PROMPT = """You are a Production Brief Generator for a creative agency middleman platform. Your job is to turn a raw meeting notes summary (captured by an AI notetaker during the client's intake call) into a structured, professional Production Brief that a creative team can act on.
 
 <task>
 1. Read the summary carefully and extract every piece of information relevant to a production brief.
@@ -274,6 +242,12 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys:
 12. "duration_minutes": An integer if a call length was explicitly stated, otherwise null. Never guess.
 13. "attendees": A list of short strings naming people/roles who were present on this call, empty list if not determinable.
 </output_format>"""
+
+
+def generate_brief(transcript_text: str, client_name: str, client_history: str = "", reference_material: str = "", system_prompt: Optional[str] = None) -> dict:
+    if system_prompt is None:
+        print("INFO: no authoritative brief_generation_prompt found — using legacy constant.")
+        system_prompt = DEFAULT_BRIEF_GENERATION_PROMPT
 
     history_block = f"\n\n<this_clients_past_engagements>\n{client_history}\n</this_clients_past_engagements>" if client_history else ""
     reference_block = f"\n\n<reference_material>\n{reference_material}\n</reference_material>" if reference_material else ""
@@ -344,8 +318,7 @@ Client Name context: {client_name}{history_block}{reference_block}"""
             return fallback
 
 
-def extract_meeting_signals(transcript_text: str) -> dict:
-    system_prompt = """You are a Meeting Signal Extractor for a creative agency middleman platform. You will receive a raw transcript from a client review meeting (e.g. a Zoom call), likely with speaker labels, timestamps, filler words, and crosstalk. Your job is NOT to summarize the whole conversation — it is to pull out only what's needed to update a Production Brief and draft a proposal, and discard everything else.
+DEFAULT_SIGNAL_EXTRACTION_PROMPT = """You are a Meeting Signal Extractor for a creative agency middleman platform. You will receive a raw transcript from a client review meeting (e.g. a Zoom call), likely with speaker labels, timestamps, filler words, and crosstalk. Your job is NOT to summarize the whole conversation — it is to pull out only what's needed to update a Production Brief and draft a proposal, and discard everything else.
 
 <task>
 Read the full transcript. Ignore small talk, technical difficulties ("can you hear me?"), and off-topic tangents. Extract and categorize everything relevant into these buckets:
@@ -380,6 +353,12 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys, each a l
 12. "duration_minutes": an integer if explicitly stated, otherwise null. Never guess.
 13. "attendees": a list of short strings, empty list if not determinable.
 </output_format>"""
+
+
+def extract_meeting_signals(transcript_text: str, system_prompt: Optional[str] = None) -> dict:
+    if system_prompt is None:
+        print("INFO: no authoritative signal_extraction_prompt found — using legacy constant.")
+        system_prompt = DEFAULT_SIGNAL_EXTRACTION_PROMPT
 
     user_prompt = f"""<transcript>
 {transcript_text}
@@ -417,25 +396,7 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys, each a l
             return empty
 
 
-def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], client_history: str = "", reference_material: str = "") -> dict:
-
-    signals = extract_meeting_signals(new_transcript)
-    signal_tokens = signals.pop('_tokens_used', 0)
-    signals_markdown = render_signals_markdown(signals)
-
-    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
-
-    if past_projects:
-        past_projects_text = chr(10).join(
-            f"- [{p.client_type}, {p.work_type}] {p.summary} Typical pricing pattern: {p.typical_pricing_notes}"
-            for p in past_projects
-        )
-    else:
-        past_projects_text = "None on file."
-
-    client_history_text = client_history or "None on file — this is the first engagement with this client, or no prior history was found."
-
-    system_prompt = """You are a Proposal Generator for a creative agency middleman platform. A Production Brief was already created from the client's intake call. Since then, the agency held a client review meeting — its transcript has already been processed by a signal-extraction step, and you now have that structured extraction rather than the raw transcript. Your job is to merge the original brief with the extracted signals into ONE final, coherent, client-ready proposal, and also generate pricing line items.
+DEFAULT_PROPOSAL_GENERATION_PROMPT = """You are a Proposal Generator for a creative agency middleman platform. A Production Brief was already created from the client's intake call. Since then, the agency held a client review meeting — its transcript has already been processed by a signal-extraction step, and you now have that structured extraction rather than the raw transcript. Your job is to merge the original brief with the extracted signals into ONE final, coherent, client-ready proposal, and also generate pricing line items.
 
 <task>
 1. Treat the original brief as the baseline.
@@ -465,6 +426,29 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys:
 7. "remaining_open_questions": A list of short strings — anything still unresolved before work can formally begin. Empty list if none remain.
 8. "action_items": A list of short strings — commitments from the review meeting that affect scope, timeline, or delivery (who owns what), empty list if none.
 </output_format>"""
+
+
+def generate_proposal(new_transcript: str, brief: Brief, client_name: str, past_projects: List[PastProject], rate_card: List[RateCardItem], client_history: str = "", reference_material: str = "", system_prompt: Optional[str] = None, signal_system_prompt: Optional[str] = None) -> dict:
+
+    signals = extract_meeting_signals(new_transcript, system_prompt=signal_system_prompt)
+    signal_tokens = signals.pop('_tokens_used', 0)
+    signals_markdown = render_signals_markdown(signals)
+
+    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
+
+    if past_projects:
+        past_projects_text = chr(10).join(
+            f"- [{p.client_type}, {p.work_type}] {p.summary} Typical pricing pattern: {p.typical_pricing_notes}"
+            for p in past_projects
+        )
+    else:
+        past_projects_text = "None on file."
+
+    client_history_text = client_history or "None on file — this is the first engagement with this client, or no prior history was found."
+
+    if system_prompt is None:
+        print("INFO: no authoritative proposal_generation_prompt found — using legacy constant.")
+        system_prompt = DEFAULT_PROPOSAL_GENERATION_PROMPT
 
     user_prompt = f"""<original_brief>
 {brief.rendered_markdown}
@@ -539,10 +523,7 @@ Client Name: {client_name}"""
             return _finish(fallback, 0)
 
 
-def revise_proposal(current_proposal: Proposal, manager_notes: str, client_name: str, rate_card: List[RateCardItem]) -> dict:
-    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
-
-    system_prompt = """You are a Proposal Revision Agent for a creative agency middleman platform. An Account Manager has reviewed a client-ready proposal and requested specific changes before it can be approved. Your job is to apply ONLY the requested changes to the existing proposal — this is a targeted edit, not a rewrite.
+DEFAULT_PROPOSAL_REVISION_PROMPT = """You are a Proposal Revision Agent for a creative agency middleman platform. An Account Manager has reviewed a client-ready proposal and requested specific changes before it can be approved. Your job is to apply ONLY the requested changes to the existing proposal — this is a targeted edit, not a rewrite.
 
 <task>
 1. Treat the Current Proposal below as the source of truth. Copy "approach", "phased_timeline", "team_shape", "remaining_open_questions", "action_items", and every pricing line item VERBATIM (identical wording, identical field values) unless the Account Manager's request specifically requires changing that exact field. Do not rephrase, rename, reformat, reorder, or "clean up" anything you were not asked to change — this is a targeted edit, not a rewrite.
@@ -564,6 +545,14 @@ Respond ONLY with a JSON object. The JSON MUST have exactly these keys, matching
 7. "remaining_open_questions": A list of short strings, copied verbatim unless the request resolves or adds one.
 8. "action_items": A list of short strings, copied verbatim unless the request changes one.
 </output_format>"""
+
+
+def revise_proposal(current_proposal: Proposal, manager_notes: str, client_name: str, rate_card: List[RateCardItem], system_prompt: Optional[str] = None) -> dict:
+    rate_card_text = chr(10).join(f"{r.category} - {r.description} ({r.unit}): {r.rate_kes} KES" for r in rate_card)
+
+    if system_prompt is None:
+        print("INFO: no authoritative proposal_revision_prompt found — using legacy constant.")
+        system_prompt = DEFAULT_PROPOSAL_REVISION_PROMPT
 
     current_fields = {
         k: v for k, v in (current_proposal.structured_json or {}).items()
@@ -616,13 +605,7 @@ Client Name: {client_name}"""
             raise RuntimeError(f"Could not apply the requested changes: {retry_e}") from retry_e
 
 
-def refine_brief(existing_brief: Brief, new_transcript: str, client_name: str) -> dict:
-    """Targeted-edit refinement of an existing brief with a second (or later) intake
-    meeting transcript, for engagements that need more than one client-meeting round
-    before moving to the proposal stage. Mirrors revise_proposal's copy-verbatim-unless-
-    changed pattern rather than regenerating the brief from scratch."""
-
-    system_prompt = """You are a Production Brief Refinement Agent for a creative agency middleman platform. A Production Brief already exists from an earlier client meeting. The agency has since had another client meeting, and you have its raw transcript. Your job is to update ONLY what this new transcript actually adds or changes — this is a targeted edit, not a rewrite.
+DEFAULT_BRIEF_REFINEMENT_PROMPT = """You are a Production Brief Refinement Agent for a creative agency middleman platform. A Production Brief already exists from an earlier client meeting. The agency has since had another client meeting, and you have its raw transcript. Your job is to update ONLY what this new transcript actually adds or changes — this is a targeted edit, not a rewrite.
 
 <task>
 1. Treat the Current Brief below as the source of truth. Copy every field verbatim unless the new transcript specifically adds, changes, or resolves something in it.
@@ -640,6 +623,17 @@ Respond ONLY with a JSON object with exactly these keys, matching the Current Br
 4. "duration_minutes": An integer if explicitly stated in this new transcript, otherwise null. Never guess.
 5. "attendees": A list of short strings present on this new call, empty list if not determinable.
 </output_format>"""
+
+
+def refine_brief(existing_brief: Brief, new_transcript: str, client_name: str, system_prompt: Optional[str] = None) -> dict:
+    """Targeted-edit refinement of an existing brief with a second (or later) intake
+    meeting transcript, for engagements that need more than one client-meeting round
+    before moving to the proposal stage. Mirrors revise_proposal's copy-verbatim-unless-
+    changed pattern rather than regenerating the brief from scratch."""
+
+    if system_prompt is None:
+        print("INFO: no authoritative brief_refinement_prompt found — using legacy constant.")
+        system_prompt = DEFAULT_BRIEF_REFINEMENT_PROMPT
 
     current_fields = {
         k: v for k, v in (existing_brief.structured_json or {}).items()
