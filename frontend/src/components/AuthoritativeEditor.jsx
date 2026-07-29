@@ -16,7 +16,7 @@ const SCOPE_LABEL = { global: 'Global', client: 'Client', engagement: 'Engagemen
 
 // Raw editor + version history + rollback for one authoritative key at one
 // scope. Embedded both by AuthoritativePanel's "Edit" affordance and by the
-// admin AuthoritativeData page — see docs/THE_EXODUS_Master_Implementation_Blueprint.md WP-1 §1.6.
+// Playbook page — see docs/THE_EXODUS_Master_Implementation_Blueprint.md WP-1 §1.6.
 export default function AuthoritativeEditor({ keyName, registryEntry, scopeType, scopeId, canEdit, onClose, onSaved }) {
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(true);

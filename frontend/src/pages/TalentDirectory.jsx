@@ -64,7 +64,9 @@ export default function TalentDirectory() {
       </div>
       <p className="text-sm text-[#8a8a83] mb-6 max-w-2xl">
         Everyone available to crew a production. Token balances combine earned history with idle
-        accrual, so people who have not worked recently rise up the casting queue.
+        accrual, so people who have not worked recently rise up the casting queue. Talent can join
+        the bench themselves at <span className="font-mono text-[#a3a39c]">/talent/join</span> —
+        those profiles are marked self-registered until someone here has worked with them.
       </p>
 
       {error && <p role="alert" className="text-sm text-rose-500 mb-4">{error}</p>}
@@ -112,6 +114,13 @@ export default function TalentDirectory() {
               {t.seniority && <span>{t.seniority.toUpperCase()}</span>}
               {t.day_rate_kes ? <span>KES {t.day_rate_kes.toLocaleString()}/day</span> : null}
               {t.avg_rating ? <span>★ {t.avg_rating}</span> : null}
+              {t.signup_source === 'self' && (
+                <span className="px-1.5 py-0.5 rounded"
+                  title="Registered themselves through the talent portal — nobody at GDF has vetted this profile yet"
+                  style={{ color: '#38bdf8', background: 'rgba(56,189,248,0.12)' }}>
+                  SELF-REGISTERED
+                </span>
+              )}
             </div>
 
             {t.location && (
@@ -128,12 +137,19 @@ export default function TalentDirectory() {
               ))}
             </div>
 
-            {canEdit && t.email && (
+            {/* Only worth offering to people who have not set a password yet —
+                anyone else already has portal access, however they got it. */}
+            {canEdit && t.email && !t.has_portal_login && (
               <button onClick={() => invite(t)} disabled={inviting === t.id}
                 className="mt-1 flex items-center gap-1 text-[11px] text-[#a3a39c] hover:text-[#e8c34a] transition-colors disabled:opacity-50">
                 {inviting === t.id ? <Loader2 size={10} className="animate-spin" /> : <Mail size={10} />}
-                {inviting === t.id ? 'Sending…' : 'Invite to portal'}
+                {inviting === t.id ? 'Sending…' : 'Email a portal set-up link'}
               </button>
+            )}
+            {t.has_portal_login && (
+              <p className="mt-1 flex items-center gap-1 text-[11px] text-[#5c5c55]">
+                <Mail size={10} /> Portal access active
+              </p>
             )}
           </div>
         ))}

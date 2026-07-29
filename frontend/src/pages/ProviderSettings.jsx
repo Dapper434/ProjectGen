@@ -61,11 +61,12 @@ export default function ProviderSettings() {
   useEffect(() => { fetchAll(); fetchHealth(); }, [fetchAll, fetchHealth]);
 
   return (
-    <div className="px-8 py-7">
+    <div className="px-8 py-6">
+      {/* Rendered inside the Settings shell, which owns the page's h1. */}
       <div className="flex items-start justify-between gap-4 flex-wrap mb-1.5">
         <div className="flex items-center gap-2.5">
-          <SlidersHorizontal size={18} className="text-[#c9971f]" />
-          <h1 className="font-serif text-[#f7f5ef] text-2xl">Providers</h1>
+          <SlidersHorizontal size={16} className="text-[#c9971f]" />
+          <h2 className="text-[#f7f5ef] text-[17px] font-semibold">Engines</h2>
         </div>
         <button
           onClick={() => fetchHealth(true)}
