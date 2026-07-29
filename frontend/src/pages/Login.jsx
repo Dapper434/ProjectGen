@@ -196,6 +196,14 @@ export default function Login() {
           <p className="mt-6 text-center text-xs text-[#6e6e67]">
             Protected workspace — GDF Kenya internal use only
           </p>
+          {/* Crew land here by mistake constantly; the portal is a different
+              surface with a different session, so send them, don't explain. */}
+          <p className="mt-2 text-center text-xs text-[#6e6e67]">
+            Crew or freelancer?{' '}
+            <a href="/talent/login" className="text-[#c9971f] hover:text-[#e8c34a] transition-colors">Talent portal</a>
+            {' · '}
+            <a href="/talent/join" className="text-[#c9971f] hover:text-[#e8c34a] transition-colors">Join the bench</a>
+          </p>
         </div>
       </div>
     </div>

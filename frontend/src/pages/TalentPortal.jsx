@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import {
   Coins, Calendar, Award, Ticket, Briefcase, HelpCircle, LogOut, Loader2, Check, X,
 } from 'lucide-react';
@@ -144,12 +144,19 @@ function HowIGetPicked({ policies }) {
 
 export default function TalentPortal() {
   const [params] = useSearchParams();
+  const location = useLocation();
   const inviteToken = params.get('token');
 
   const [me, setMe] = useState(null);
   const [tab, setTab] = useState('dashboard');
+  // 'signin' | 'signup'. Sign-up is open: anyone can join the bench themselves,
+  // no invite needed. /talent/join links straight into it.
+  const [mode, setMode] = useState(location.pathname === '/talent/join' ? 'signup' : 'signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [title, setTitle] = useState('');
+  const [locationField, setLocationField] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -187,18 +194,39 @@ export default function TalentPortal() {
 
   useEffect(() => { loadTab(); }, [loadTab]);
 
-  async function login(e) {
+  async function submitAuth(e) {
     e.preventDefault();
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setNotice('');
     try {
-      const path = inviteToken ? 'set-password' : 'login';
-      const body = inviteToken ? { token: inviteToken, password } : { email, password };
+      let path = 'login';
+      let body = { email, password };
+      if (inviteToken) {
+        path = 'set-password';
+        body = { token: inviteToken, password };
+      } else if (mode === 'signup') {
+        path = 'signup';
+        body = { name, email, password, title: title || undefined, location: locationField || undefined };
+      }
+
       const res = await fetch(`${API}/talent/${path}`, {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setError(data.error || 'Sign-in failed.'); return; }
+      if (!res.ok) {
+        setError(data.error || (mode === 'signup' ? 'Could not create that account.' : 'Sign-in failed.'));
+        return;
+      }
+      if (data.claim_sent) {
+        // Already on the bench: the account is theirs to claim by email, not to
+        // create here. Nothing is signed in yet.
+        setNotice(data.link
+          ? `${data.message} Console driver — link: ${data.link}`
+          : data.message);
+        setMode('signin');
+        setPassword('');
+        return;
+      }
       loadMe();
     } finally { setBusy(false); }
   }
@@ -257,12 +285,14 @@ export default function TalentPortal() {
     setCode(''); loadMe(); loadTab();
   }
 
-  // --- login / invite ------------------------------------------------------
+  // --- sign in / join / claim an invite -------------------------------------
   if (!me) {
+    const signingUp = !inviteToken && mode === 'signup';
+    const needsNewPassword = signingUp || !!inviteToken;
     return (
-      <div className="min-h-screen flex items-center justify-center px-4" style={{ background: '#0a0a0a' }}>
-        <form onSubmit={login} className="w-full max-w-sm flex flex-col gap-4">
-          <div className="flex items-center gap-2.5 mb-2">
+      <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: '#0a0a0a' }}>
+        <form onSubmit={submitAuth} className="w-full max-w-sm flex flex-col gap-4">
+          <div className="flex items-center gap-2.5 mb-1">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
               style={{ background: 'linear-gradient(135deg, #c9971f, #a67a17)' }}>
               <span className="text-white font-bold text-xs">EX</span>
@@ -272,11 +302,46 @@ export default function TalentPortal() {
 
           {inviteToken ? (
             <p className="text-[13px] text-[#8a8a83]">Choose a password to finish setting up your account.</p>
-          ) : (
+          ) : signingUp ? (
+            <p className="text-[13px] text-[#8a8a83]">
+              Join the GDF talent bench. Your account is live the moment you create it — set your
+              availability, earn tokens, and get considered for every production we crew.
+            </p>
+          ) : null}
+
+          {signingUp && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="tp-name" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">FULL NAME</label>
+                <input id="tp-name" value={name} onChange={e => setName(e.target.value)}
+                  required autoComplete="name"
+                  className="rounded-lg px-3 py-2 text-[13px] text-[#d6d4c9] bg-[#0e0e0e]"
+                  style={{ border: '1px solid #262626' }} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="tp-title" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">DISCIPLINE</label>
+                  <input id="tp-title" value={title} onChange={e => setTitle(e.target.value)}
+                    placeholder="e.g. Editor"
+                    className="rounded-lg px-3 py-2 text-[13px] text-[#d6d4c9] bg-[#0e0e0e] placeholder:text-[#4a4a45]"
+                    style={{ border: '1px solid #262626' }} />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="tp-loc" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">BASED IN</label>
+                  <input id="tp-loc" value={locationField} onChange={e => setLocationField(e.target.value)}
+                    placeholder="e.g. Nairobi"
+                    className="rounded-lg px-3 py-2 text-[13px] text-[#d6d4c9] bg-[#0e0e0e] placeholder:text-[#4a4a45]"
+                    style={{ border: '1px solid #262626' }} />
+                </div>
+              </div>
+            </>
+          )}
+
+          {!inviteToken && (
             <div className="flex flex-col gap-1.5">
               <label htmlFor="tp-email" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">EMAIL</label>
               <input id="tp-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
-                required autoComplete="username"
+                required autoComplete={signingUp ? 'email' : 'username'}
                 className="rounded-lg px-3 py-2 text-[13px] text-[#d6d4c9] bg-[#0e0e0e]"
                 style={{ border: '1px solid #262626' }} />
             </div>
@@ -285,21 +350,32 @@ export default function TalentPortal() {
           <div className="flex flex-col gap-1.5">
             <label htmlFor="tp-pass" className="text-[10px] font-mono tracking-wider text-[#8a8a83]">PASSWORD</label>
             <input id="tp-pass" type="password" value={password} onChange={e => setPassword(e.target.value)}
-              required autoComplete={inviteToken ? 'new-password' : 'current-password'}
-              minLength={inviteToken ? 10 : undefined}
+              required autoComplete={needsNewPassword ? 'new-password' : 'current-password'}
+              minLength={needsNewPassword ? 10 : undefined}
               className="rounded-lg px-3 py-2 text-[13px] text-[#d6d4c9] bg-[#0e0e0e]"
               style={{ border: '1px solid #262626' }} />
-            {inviteToken && <p className="text-[10px] text-[#5c5c55]">At least 10 characters.</p>}
+            {needsNewPassword && <p className="text-[10px] text-[#5c5c55]">At least 10 characters.</p>}
           </div>
 
           {error && <p role="alert" className="text-xs text-rose-500">{error}</p>}
+          {notice && <p role="status" className="text-xs text-[#10b981] break-all">{notice}</p>}
 
           <button type="submit" disabled={busy}
             className="flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50"
             style={{ background: 'linear-gradient(135deg, #c9971f, #a67a17)' }}>
             {busy && <Loader2 size={14} className="animate-spin" />}
-            {inviteToken ? 'Set password & sign in' : 'Sign in'}
+            {inviteToken ? 'Set password & sign in' : signingUp ? 'Create my account' : 'Sign in'}
           </button>
+
+          {!inviteToken && (
+            <button type="button"
+              onClick={() => { setMode(signingUp ? 'signin' : 'signup'); setError(''); setNotice(''); }}
+              className="text-[12px] text-[#8a8a83] hover:text-[#e8c34a] transition-colors">
+              {signingUp
+                ? 'Already have an account? Sign in'
+                : "New here? Create an account — you don't need an invite"}
+            </button>
+          )}
         </form>
       </div>
     );

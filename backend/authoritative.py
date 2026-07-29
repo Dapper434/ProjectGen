@@ -58,6 +58,28 @@ class FathomMatchingSchema(BaseModel):
     min_client_name_length: int = Field(default=3, ge=3, le=50)
 
 
+# Section headings for the Playbook, in the order they are shown. `group` on a
+# registry entry indexes into this — the UI renders whatever is here rather than
+# hardcoding its own copy of the taxonomy, so adding a section is a one-line
+# change in this file.
+GROUPS = {
+    'prompts': {
+        'title': 'Agent Instructions',
+        'blurb': 'The system prompt each agent is given before it writes anything. '
+                 'Edit these to change how the work reads.',
+    },
+    'voice': {
+        'title': 'Voice & Templates',
+        'blurb': 'House tone and boilerplate that client-facing documents inherit. '
+                 'Both can be overridden for an individual client.',
+    },
+    'policies': {
+        'title': 'Policies & Rules',
+        'blurb': 'Structured settings the system obeys without asking a model — scoring '
+                 'weights, token values, agendas, thresholds.',
+    },
+}
+
 # --- the key registry --------------------------------------------------------
 # Declared in code (not the database) so the admin UI is self-documenting: what
 # a key is for, who reads it, which scopes it supports. `fmt='json'` entries may
@@ -76,73 +98,100 @@ class FathomMatchingSchema(BaseModel):
 REGISTRY = {
     'brief_generation_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['generate_brief'],
+        'consumers': ['generate_brief'], 'group': 'prompts',
         'title': 'Brief Generation — system prompt',
+        'description': 'Everything the model is told before it turns a client meeting '
+                       'transcript into a Production Brief.',
     },
     'brief_refinement_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['refine_brief'],
+        'consumers': ['refine_brief'], 'group': 'prompts',
         'title': 'Brief Refinement — system prompt',
+        'description': "How a review meeting's corrections get merged into an existing "
+                       'brief without discarding what nobody questioned.',
     },
     'signal_extraction_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['extract_meeting_signals'],
+        'consumers': ['extract_meeting_signals'], 'group': 'prompts',
         'title': 'Meeting Signal Extraction — system prompt',
+        'description': 'What the model may pull out of a transcript — date, attendees, '
+                       'duration, recap — and what it must leave blank instead of guessing.',
     },
     'proposal_generation_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['generate_proposal'],
+        'consumers': ['generate_proposal'], 'group': 'prompts',
         'title': 'Proposal Generation — system prompt',
+        'description': 'How an approved brief, the rate card and comparable past projects '
+                       'become a Client Proposal.',
     },
     'proposal_revision_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['revise_proposal'],
+        'consumers': ['revise_proposal'], 'group': 'prompts',
         'title': 'Proposal Revision — system prompt',
+        'description': 'How a proposal is amended in place — changed sections rewritten, '
+                       'everything else carried over verbatim.',
     },
     'brand_voice': {
         'fmt': 'markdown', 'scopes': ('global', 'client'),
-        'consumers': [],
+        'consumers': [], 'group': 'voice',
         'title': 'Brand Voice',
+        'description': 'House tone every client-facing document inherits. Override it on a '
+                       "client's page when one account needs a different register.",
     },
     'polish_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['polish'],
+        'consumers': ['polish'], 'group': 'prompts',
         'title': 'Transcript Cleanup — system prompt',
+        'description': 'The single cleanup pass over a raw transcript. Removes filler and '
+                       'fixes spelling; never summarises, infers or adds.',
     },
     'email_cover_note': {
         'fmt': 'markdown', 'scopes': ('global', 'client'),
-        'consumers': [],
+        'consumers': [], 'group': 'voice',
         'title': 'Email Cover Note Template',
+        'description': 'The covering note that goes out with an approved proposal.',
     },
     'boardroom_protocol': {
         'fmt': 'json', 'scopes': ('global', 'client', 'engagement'),
-        'consumers': ['analyze_coverage', 'Boardroom.jsx'],
+        'consumers': ['analyze_coverage', 'Boardroom.jsx'], 'group': 'policies',
         'title': 'Boardroom Meeting Protocol',
+        'description': 'The agenda a live meeting is graded against — every item the '
+                       'Boardroom will report as covered, partial or missed.',
     },
     'coverage_prompt': {
         'fmt': 'markdown', 'scopes': ('global',), 'variants': True,
-        'consumers': ['analyze_coverage'],
+        'consumers': ['analyze_coverage'], 'group': 'prompts',
         'title': 'Coverage Agent — system prompt',
+        'description': 'How the Boardroom decides an agenda item was genuinely covered, and '
+                       'why evidence-free means partial rather than covered.',
     },
     'talent_token_policy': {
         'fmt': 'json', 'scopes': ('global',),
-        'consumers': ['tokens.balance', 'HowIGetPicked.jsx'],
+        'consumers': ['tokens.balance', 'HowIGetPicked.jsx'], 'group': 'policies',
         'title': 'Talent Token Policy',
+        'description': 'What each action earns a talent, how idle accrual builds up, and '
+                       'where the ceiling sits.',
     },
     'casting_policy': {
         'fmt': 'json', 'scopes': ('global', 'engagement'), 'schema': CastingPolicySchema,
-        'consumers': ['run_casting', 'HowIGetPicked.jsx'],
+        'consumers': ['run_casting', 'HowIGetPicked.jsx'], 'group': 'policies',
         'title': 'Casting Policy',
+        'description': 'Scoring weights, shortlist size and offer expiry. Weights must sum '
+                       'to 1.0 — a save that breaks that is rejected.',
     },
     'certification_catalog': {
         'fmt': 'json', 'scopes': ('global',),
-        'consumers': ['TalentCertifications.jsx'],
+        'consumers': ['TalentCertifications.jsx'], 'group': 'policies',
         'title': 'Certification Catalog',
+        'description': 'The certifications talent can take in the portal — questions, pass '
+                       'marks, token awards and how long each stays valid.',
     },
     'fathom_matching': {
         'fmt': 'json', 'scopes': ('global',), 'schema': FathomMatchingSchema,
-        'consumers': ['_auto_match_client'],
+        'consumers': ['_auto_match_client'], 'group': 'policies',
         'title': 'Fathom Auto-Attach Matching',
+        'description': 'How confident a meeting-title match must be before an inbound '
+                       'transcript attaches itself to a client instead of waiting in the Inbox.',
     },
     # WP-7/9/10/11 add their own json-format keys (boardroom_protocol,
     # talent_token_policy, casting_policy, certification_catalog) here when

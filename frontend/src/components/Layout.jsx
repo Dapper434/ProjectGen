@@ -1,19 +1,56 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Layers, BarChart3, ClipboardCheck, Inbox, LogOut, Plus, BookOpen, SlidersHorizontal, FlaskConical, AudioLines, Presentation as PresentationIcon, Users } from 'lucide-react';
+import { LayoutDashboard, Layers, BarChart3, Inbox, LogOut, Plus, BookOpen, Settings as SettingsIcon, AudioLines, Presentation as PresentationIcon, Users } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import SearchBar from './SearchBar';
 import { useConfig } from '../lib/config.jsx';
 
-const navItems = [
-  { icon: LayoutDashboard, label: 'Dashboard', to: '/dashboard' },
-  { icon: Layers, label: 'Engagements', to: '/engagements' },
-  { icon: Inbox, label: 'Inbox', to: '/inbox' },
-  { icon: ClipboardCheck, label: 'Requirements', to: '/requirements' },
-];
-
-const adminNavItems = [
-  { icon: BarChart3, label: 'Analytics', to: '/analytics' },
-];
+// The sidebar is grouped by what you are doing, not by which work package
+// shipped the page. Daily work sits at the top; anything you configure once
+// lives under System, where Settings collects the provider registry and the two
+// Labs. `hint` becomes the link's title/aria description — several of these
+// names only make sense once.
+function navSections({ flags, role }) {
+  return [
+    {
+      heading: 'Delivery',
+      items: [
+        { icon: LayoutDashboard, label: 'Dashboard', to: '/dashboard',
+          hint: 'What needs you today, across every engagement' },
+        { icon: Layers, label: 'Engagements', to: '/engagements',
+          hint: 'Every client job, from transcript to signed proposal' },
+        { icon: Inbox, label: 'Meeting Inbox', to: '/inbox',
+          hint: 'Transcripts that arrived on their own and need attaching' },
+      ],
+    },
+    {
+      heading: 'Meetings',
+      items: [
+        ...(flags.boardroom ? [{ icon: PresentationIcon, label: 'Boardroom', to: '/boardroom',
+          hint: 'Live meeting coverage — what has been discussed, what has been missed' }] : []),
+        ...(flags.recordings ? [{ icon: AudioLines, label: 'Recordings', to: '/recordings',
+          hint: 'Upload a recording and get a cleaned-up transcript back' }] : []),
+      ],
+    },
+    {
+      heading: 'Crew',
+      items: [
+        ...(flags.talent ? [{ icon: Users, label: 'Talent Bench', to: '/talent',
+          hint: 'Everyone available to crew a production' }] : []),
+      ],
+    },
+    {
+      heading: 'System',
+      items: [
+        { icon: BookOpen, label: 'Playbook', to: '/playbook',
+          hint: 'The instructions, policies and standards the system works to' },
+        ...(role === 'Admin' ? [{ icon: BarChart3, label: 'Analytics', to: '/analytics',
+          hint: 'Throughput, agent cost and turnaround over time' }] : []),
+        ...(flags.lab ? [{ icon: SettingsIcon, label: 'Settings', to: '/settings',
+          hint: 'Which engines run each capability, plus the comparison Labs' }] : []),
+      ],
+    },
+  ].filter(section => section.items.length > 0);
+}
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -80,48 +117,49 @@ export default function Layout() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-2 flex flex-col gap-0.5">
-          {[
-            ...navItems,
-            ...(flags.talent ? [{ icon: Users, label: 'Talent', to: '/talent' }] : []),
-            ...(flags.boardroom ? [{ icon: PresentationIcon, label: 'Boardroom', to: '/boardroom' }] : []),
-            ...(flags.recordings ? [{ icon: AudioLines, label: 'Recordings', to: '/recordings' }] : []),
-            ...(flags.auth_data ? [{ icon: BookOpen, label: 'Authoritative Data', to: '/authoritative' }] : []),
-            ...(flags.lab ? [
-              { icon: SlidersHorizontal, label: 'Providers', to: '/providers' },
-              { icon: FlaskConical, label: 'Lab · Agents', to: '/lab/agents' },
-              ...(flags.voice ? [{ icon: AudioLines, label: 'Lab · Speech', to: '/lab/transcription' }] : []),
-            ] : []),
-            ...(user.role === 'Admin' ? adminNavItems : []),
-          ].map(({ icon: Icon, label, to }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-all duration-150 group ${
-                  isActive
-                    ? 'text-[#f7f5ef]'
-                    : 'text-[#8a8a83] hover:text-[#d6d4c9] hover:bg-[#ffffff06]'
-                }`
-              }
-              style={({ isActive }) => isActive ? {
-                background: 'linear-gradient(90deg, rgba(201,151,31,0.18) 0%, rgba(201,151,31,0.06) 100%)',
-                borderLeft: '2px solid #c9971f',
-                paddingLeft: '10px',
-              } : { borderLeft: '2px solid transparent' }}
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon size={16} className={isActive ? 'text-[#e8c34a]' : 'text-[#5c5c55] group-hover:text-[#8a8a83]'} />
-                  {label}
-                  {to === '/inbox' && inboxCount > 0 && (
-                    <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#c9971f]/20 text-[#e8c34a] border border-[#c9971f]/30">
-                      {inboxCount}
-                    </span>
-                  )}
-                </>
-              )}
-            </NavLink>
+        <nav className="flex-1 overflow-y-auto px-3 py-2 flex flex-col gap-0.5">
+          {navSections({ flags, role: user.role }).map(({ heading, items }, sectionIndex) => (
+            <div key={heading} className={sectionIndex === 0 ? '' : 'mt-4'}>
+              <p className="px-3 pb-1.5 text-[9px] font-mono uppercase tracking-[0.14em] text-[#4a4a45]">
+                {heading}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                {items.map(({ icon: Icon, label, to, hint }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    title={hint}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-all duration-150 group ${
+                        isActive
+                          ? 'text-[#f7f5ef]'
+                          : 'text-[#8a8a83] hover:text-[#d6d4c9] hover:bg-[#ffffff06]'
+                      }`
+                    }
+                    style={({ isActive }) => isActive ? {
+                      background: 'linear-gradient(90deg, rgba(201,151,31,0.18) 0%, rgba(201,151,31,0.06) 100%)',
+                      borderLeft: '2px solid #c9971f',
+                      paddingLeft: '10px',
+                    } : { borderLeft: '2px solid transparent' }}
+                  >
+                    {({ isActive }) => (
+                      <>
+                        <Icon size={16} className={isActive ? 'text-[#e8c34a]' : 'text-[#5c5c55] group-hover:text-[#8a8a83]'} />
+                        {label}
+                        {to === '/inbox' && inboxCount > 0 && (
+                          <span
+                            aria-label={`${inboxCount} transcripts waiting`}
+                            className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#c9971f]/20 text-[#e8c34a] border border-[#c9971f]/30"
+                          >
+                            {inboxCount}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 

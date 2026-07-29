@@ -286,7 +286,7 @@ function MeetingSummaryCard({ transcript }) {
 }
 
 // Passive completeness badge — checks a generated brief/proposal against agency-
-// uploaded authoritative requirements (Requirements.jsx). Fetches lazily after the
+// uploaded requirement documents (the Playbook's "Definition of Done"). Fetches lazily after the
 // engagement itself has already loaded, so it never blocks the main page render, and
 // polls only while a check is actually in flight. Never blocks any action — purely
 // informational.

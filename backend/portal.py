@@ -78,6 +78,42 @@ def redeem_invite(token, password):
     return talent, None
 
 
+def register(name, email, password, title=None, location=None, phone=None):
+    """Open sign-up: a talent creates their own account, no invite needed.
+
+    Returns `(talent, error, claim_token)`. Exactly one of `talent` / `error` is
+    set; `claim_token` is set instead of both in the one case that must not be a
+    plain sign-up — an email that is *already on the agency's bench* without a
+    portal password. Letting that through would hand anyone who knows a crew
+    member's email address their profile, so it becomes an emailed claim link
+    (the existing invite flow) rather than an instant login.
+    """
+    name = (name or '').strip()
+    email = (email or '').strip().lower()
+    if not name:
+        return None, "Enter your name.", None
+    if '@' not in email or len(email) < 5:
+        return None, "Enter a valid email address.", None
+    if len(password or '') < MIN_PASSWORD_LENGTH:
+        return None, f"Choose a password of at least {MIN_PASSWORD_LENGTH} characters.", None
+
+    existing = db_session.query(Talent).filter(Talent.email == email).first()
+    if existing:
+        if existing.portal_password_hash:
+            return None, "That email already has an account. Sign in instead.", None
+        return None, None, create_invite(existing.id)
+
+    talent = Talent(
+        name=name, email=email, title=(title or '').strip() or None,
+        location=(location or '').strip() or None, phone=(phone or '').strip() or None,
+        skills=[], engagement_type='contract', status='active', is_active=True,
+        signup_source='self', portal_password_hash=generate_password_hash(password),
+    )
+    db_session.add(talent)
+    db_session.commit()
+    return talent, None, None
+
+
 def throttled(ip):
     """10 attempts per hour per IP, then a lockout."""
     now = datetime.datetime.utcnow()

@@ -81,10 +81,11 @@ export default function LabTranscription() {
   const candidate = okResults.find(r => r.id === diffAgainst);
 
   return (
-    <div className="px-8 py-7">
+    <div className="px-8 py-6">
+      {/* Rendered inside the Settings shell, which owns the page's h1. */}
       <div className="flex items-center gap-2.5 mb-1.5">
-        <FlaskConical size={18} className="text-[#c9971f]" />
-        <h1 className="font-serif text-[#f7f5ef] text-2xl">Lab · Transcription</h1>
+        <FlaskConical size={16} className="text-[#c9971f]" />
+        <h2 className="text-[#f7f5ef] text-[17px] font-semibold">Speech Lab</h2>
       </div>
       <p className="text-sm text-[#8a8a83] mb-7 max-w-2xl">
         Run one recording through several speech engines and compare them word by word.

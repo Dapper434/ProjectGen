@@ -99,6 +99,11 @@ class RequirementDocument(Base):
     is_active = Column(Boolean, default=True)  # soft-delete — this app never hard-deletes
     uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
     uploaded_by = Column(Integer, ForeignKey('users.id'))
+    # Editable in place from the Playbook. Unlike AuthoritativeDoc these are not
+    # versioned — they are a free-text corpus, not a pinned agent instruction —
+    # so the audit trail is just "who last touched it, when".
+    updated_at = Column(DateTime)
+    updated_by = Column(Integer, ForeignKey('users.id'))
 
 class ReferenceDocument(Base):
     """Optional engagement-scoped reference material (proposal templates, client RFPs,
@@ -176,9 +181,14 @@ class Talent(Base):
     last_assigned_at = Column(DateTime)   # denormalised; drives idle-token accrual
     avg_rating = Column(Float)            # denormalised from completed assignments
     notes = Column(Text)                  # INTERNAL — never exposed to the talent
-    portal_password_hash = Column(String(200))   # WP-11; null until invited
+    portal_password_hash = Column(String(200))   # WP-11; null until they register or redeem an invite
     portal_invited_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    # 'self' when the talent registered themselves through the portal, 'agency'
+    # (or NULL, for every row that predates open sign-up) when someone at GDF
+    # added them. Casting does not read this — it is a curation signal for the
+    # bench, so a producer can tell a vetted crew member from a walk-in.
+    signup_source = Column(String(20))
 
     # Named explicitly: SQLite batch migrations cannot alter an unnamed constraint.
     __table_args__ = (UniqueConstraint('email', name='uq_talent_email'),)

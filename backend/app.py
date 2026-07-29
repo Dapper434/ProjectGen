@@ -11,7 +11,7 @@ from flask_cors import CORS
 from config import Config
 from database import db_session, init_db
 from models import User, Client, Engagement, Transcript, Brief, Proposal, RateCardItem, PastProject, AgentEvent, RequirementDocument, ReferenceDocument, InboundTranscript, Talent, StaffingPlan, AuthoritativeDoc, ComparisonRun, RecordingJob, RecordingSegment, BoardroomSession, TranscriptSegment, CoverageCheck, AvailabilityBlock, PortfolioItem, Assignment, CastingRun, Certification, CertificationEnrollment, Event, EventAttendance, TalentSkill
-from authoritative import REGISTRY as AUTH_REGISTRY, resolve as auth_resolve, create_version as auth_create_version, activate_version as auth_activate_version, list_versions as auth_list_versions, build_refs, AuthoritativeError
+from authoritative import REGISTRY as AUTH_REGISTRY, GROUPS as AUTH_GROUPS, resolve as auth_resolve, create_version as auth_create_version, activate_version as auth_activate_version, list_versions as auth_list_versions, build_refs, AuthoritativeError
 from locks import agent_lock, is_locked, AlreadyProcessing
 import assignments as assignments_mod
 import audio
@@ -111,17 +111,21 @@ def _auth_doc_json(d, include_body=False):
     return out
 
 
-def _auth_registry_json():
+def _auth_entry_json(key, entry):
     return {
-        key: {
-            "title": entry.get('title', key),
-            "fmt": entry['fmt'],
-            "scopes": list(entry['scopes']),
-            "consumers": entry.get('consumers', []),
-            "variants": bool(entry.get('variants')),
-        }
-        for key, entry in AUTH_REGISTRY.items()
+        "key": key,
+        "title": entry.get('title', key),
+        "description": entry.get('description', ''),
+        "group": entry.get('group', 'policies'),
+        "fmt": entry['fmt'],
+        "scopes": list(entry['scopes']),
+        "consumers": entry.get('consumers', []),
+        "variants": bool(entry.get('variants')),
     }
+
+
+def _auth_registry_json():
+    return {key: _auth_entry_json(key, entry) for key, entry in AUTH_REGISTRY.items()}
 
 
 @app.route('/api/authoritative', methods=['GET', 'POST'])
@@ -168,17 +172,18 @@ def authoritative_list():
         docs_by_key.setdefault(d.key, []).append(_auth_doc_json(d))
 
     return jsonify([
-        {
-            "key": key,
-            "title": entry.get('title', key),
-            "fmt": entry['fmt'],
-            "scopes": list(entry['scopes']),
-            "consumers": entry.get('consumers', []),
-            "variants": bool(entry.get('variants')),
-            "active_docs": docs_by_key.get(key, []),
-        }
+        {**_auth_entry_json(key, entry), "active_docs": docs_by_key.get(key, [])}
         for key, entry in AUTH_REGISTRY.items()
     ])
+
+
+@app.route('/api/authoritative/groups', methods=['GET'])
+@feature('auth_data')
+@require_role(*INTERNAL_ROLES)
+def authoritative_groups():
+    """Section headings for the Playbook, in display order. Owned by the registry
+    so the UI never keeps its own copy of the taxonomy."""
+    return jsonify([{"id": gid, **meta} for gid, meta in AUTH_GROUPS.items()])
 
 
 @app.route('/api/authoritative/registry', methods=['GET'])
@@ -371,6 +376,54 @@ def talent_login():
     session['role'] = 'Talent'
     session['talent_id'] = talent.id
     return jsonify({"name": talent.name, "email": talent.email})
+
+
+@app.route('/api/talent/signup', methods=['POST'])
+@feature('talent_portal')
+def talent_signup():
+    """Open sign-up — a talent joins the bench themselves, no invite required.
+
+    Rate-limited on the same per-IP counter as login, since this endpoint also
+    reveals whether an email is known to the system. A new account is live
+    immediately (`signup_source='self'`) so the person can build a profile and
+    take certifications the moment they land; the bench UI marks them
+    self-registered so a producer can tell them from vetted crew.
+    """
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+    if portal.throttled(ip):
+        return jsonify({"error": "Too many attempts. Try again in an hour."}), 429
+
+    data = request.get_json(silent=True) or {}
+    talent, error, claim_token = portal.register(
+        name=data.get('name'), email=data.get('email'), password=data.get('password'),
+        title=data.get('title'), location=data.get('location'), phone=data.get('phone'),
+    )
+    if error:
+        portal.record_attempt(ip)
+        return jsonify({"error": error}), 400
+
+    if claim_token:
+        # Already on the bench but never set a password: confirm ownership of the
+        # address before handing over the profile. 202, not 201 — nothing is live yet.
+        email = (data.get('email') or '').strip().lower()
+        link = f"{Config.APP_BASE_URL.rstrip('/')}/talent/set-password?token={claim_token}"
+        result = mailer.send(
+            email, "Claim your Exodus talent profile",
+            f"Someone (hopefully you) tried to create an account with this address.\n\n"
+            f"You are already on the GDF talent bench, so set your password here instead:\n\n{link}\n\n"
+            f"This link works once and expires in {portal.INVITE_TTL_HOURS} hours. "
+            f"If this wasn't you, ignore this email — nothing has changed.",
+        )
+        return jsonify({
+            "claim_sent": True,
+            "message": "You're already on the GDF bench. We've emailed you a link to set your password.",
+            "link": link if result['driver'] == 'console' else None,
+        }), 202
+
+    session.clear()
+    session['role'] = 'Talent'
+    session['talent_id'] = talent.id
+    return jsonify({"name": talent.name, "email": talent.email}), 201
 
 
 @app.route('/api/talent/logout', methods=['POST'])
@@ -706,9 +759,12 @@ def talent_event_checkin():
 @feature('talent')
 @require_role('Account Manager', 'Admin')
 def talent_invite(talent_id):
-    """Invite-only registration — there is no open sign-up; the bench is curated.
-    With EMAIL_DRIVER=console the link prints to stdout, so the whole flow is
-    testable with no vendor account."""
+    """Nudge someone GDF added to the bench into setting a portal password.
+
+    Talents can also register themselves (`POST /api/talent/signup`); this route
+    exists for the other direction — a producer added the profile first and wants
+    the person to take it over. With EMAIL_DRIVER=console the link prints to
+    stdout, so the whole flow is testable with no vendor account."""
     t = db_session.query(Talent).get(talent_id)
     if not t:
         return jsonify({"error": "Talent not found"}), 404
@@ -743,6 +799,10 @@ def _talent_json(t, detail=False):
         "email": t.email, "avatar_url": t.avatar_url,
         "last_assigned_at": t.last_assigned_at.isoformat() if t.last_assigned_at else None,
         "tokens": tokens_mod.balance(t),
+        # Curation signals for the bench UI. Rows predating open sign-up have no
+        # source recorded and read as agency-added.
+        "signup_source": t.signup_source or 'agency',
+        "has_portal_login": bool(t.portal_password_hash),
     }
     if detail:
         blocks = db_session.query(AvailabilityBlock).filter_by(talent_id=t.id).order_by(
@@ -1995,12 +2055,20 @@ def _requirement_docs_for(doc_type):
 
 
 def _requirement_fingerprint(doc_type):
-    q = db_session.query(func.count(RequirementDocument.id), func.max(RequirementDocument.id)).filter(
+    """Identifies the corpus a cached completeness result was computed against.
+    `last_edit` is what makes an in-place edit (Playbook) invalidate that cache —
+    count and max_id both stay put when someone only rewords a document."""
+    q = db_session.query(
+        func.count(RequirementDocument.id),
+        func.max(RequirementDocument.id),
+        func.max(RequirementDocument.updated_at),
+    ).filter(
         RequirementDocument.is_active == True,  # noqa: E712
         RequirementDocument.doc_type.in_([doc_type, 'general'])
     )
-    count, max_id = q.one()
-    return {"count": count or 0, "max_id": max_id or 0}
+    count, max_id, last_edit = q.one()
+    return {"count": count or 0, "max_id": max_id or 0,
+            "last_edit": last_edit.isoformat() if last_edit else None}
 
 
 def _process_completeness_check(doc_type, doc_id):
@@ -2100,16 +2168,68 @@ def requirements_list():
         return jsonify({"id": doc.id}), 201
 
     docs = db_session.query(RequirementDocument).filter_by(is_active=True).order_by(RequirementDocument.uploaded_at.desc()).all()
-    return jsonify([
-        {
-            "id": d.id,
-            "title": d.title,
-            "doc_type": d.doc_type,
-            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
-            "uploaded_by": (db_session.query(User).get(d.uploaded_by).username if d.uploaded_by else None),
-            "length": len(d.raw_text or ''),
-        } for d in docs
-    ])
+    return jsonify([_requirement_json(d) for d in docs])
+
+
+def _requirement_json(d, include_text=False):
+    def username(user_id):
+        user = db_session.query(User).get(user_id) if user_id else None
+        return user.username if user else None
+
+    out = {
+        "id": d.id,
+        "title": d.title,
+        "doc_type": d.doc_type,
+        "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+        "uploaded_by": username(d.uploaded_by),
+        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+        "updated_by": username(d.updated_by),
+        "length": len(d.raw_text or ''),
+    }
+    if include_text:
+        out["raw_text"] = d.raw_text or ''
+    return out
+
+
+@app.route('/api/requirements/<int:doc_id>', methods=['GET', 'PATCH'])
+def requirement_detail(doc_id):
+    """Read one requirement document in full, or edit it.
+
+    Edits are in place rather than versioned: unlike an AuthoritativeDoc, this is
+    a free-text corpus the completeness checker retrieves against, not a pinned
+    instruction an AgentEvent has to be able to replay. Bumping `updated_at`
+    moves `_requirement_fingerprint`, so every cached brief/proposal completeness
+    result computed against the old wording is flagged stale rather than quietly
+    surviving the edit.
+    """
+    doc = db_session.query(RequirementDocument).get(doc_id)
+    if not doc or not doc.is_active:
+        return jsonify({"error": "Not found"}), 404
+
+    if request.method == 'PATCH':
+        if session.get('role') not in ('Account Manager', 'Admin'):
+            return jsonify({"error": "Account Manager or Admin role required."}), 403
+
+        data = request.get_json(silent=True) or {}
+        if 'doc_type' in data:
+            if data['doc_type'] not in ('brief', 'proposal', 'general'):
+                return jsonify({"error": "doc_type must be one of: brief, proposal, general"}), 400
+            doc.doc_type = data['doc_type']
+        if 'title' in data:
+            title = (data.get('title') or '').strip()
+            if not title:
+                return jsonify({"error": "Title is required"}), 400
+            doc.title = title
+        if 'raw_text' in data:
+            raw_text = (data.get('raw_text') or '').strip()
+            if not raw_text:
+                return jsonify({"error": "Document text is required"}), 400
+            doc.raw_text = raw_text
+        doc.updated_at = datetime.now()
+        doc.updated_by = session.get('user_id')
+        db_session.commit()
+
+    return jsonify(_requirement_json(doc, include_text=True))
 
 
 @app.route('/api/requirements/<int:doc_id>/deactivate', methods=['POST'])

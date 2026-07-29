@@ -486,7 +486,11 @@ Write access: `Account Manager` and `Admin`. Read: any authenticated internal ro
 ### 1.6 Frontend — one editor, embedded in many places
 
 ```
-frontend/src/pages/AuthoritativeData.jsx        (NEW)  admin list: key, scope, version, updated by/when
+frontend/src/pages/Playbook.jsx                 (NEW)  the global list: key, scope, version, updated by/when.
+                                                       Shipped as AuthoritativeData.jsx; later merged with the
+                                                       Requirements page into one "Playbook", grouped by
+                                                       authoritative.GROUPS, because prompts, policies and the
+                                                       completeness corpus are one mental model, not two pages
 frontend/src/components/AuthoritativeEditor.jsx (NEW)  raw editor, JSON validation, diff vs active,
                                                        changelog note, version dropdown, rollback
 frontend/src/components/AuthoritativePanel.jsx  (NEW)  embeddable read-only card + "Edit" affordance
@@ -534,7 +538,7 @@ Delete the fallback in the release *after* the seed lands, once logs show it nev
 
 ### 1.9 What WP-1 actually shipped, and two deliberate deviations
 
-Built as specified: `AuthoritativeDoc`, `AgentEvent.authoritative_refs`, `backend/authoritative.py` (`resolve` / `create_version` / `activate_version` / `build_refs`), all six endpoints, `AuthoritativePanel` / `AuthoritativeEditor` / `AuthoritativeData.jsx`, and `seed_authoritative.py`. Everything sits behind `FEATURE_AUTH_DATA`, default off, 404 when disabled.
+Built as specified: `AuthoritativeDoc`, `AgentEvent.authoritative_refs`, `backend/authoritative.py` (`resolve` / `create_version` / `activate_version` / `build_refs`), all six endpoints, `AuthoritativePanel` / `AuthoritativeEditor` / `AuthoritativeData.jsx` (now `Playbook.jsx`), and `seed_authoritative.py`. Everything sits behind `FEATURE_AUTH_DATA`, default off, 404 when disabled.
 
 **Deviation 1 — five prompt keys, not two.** The sketch in §1.4 groups generation and refinement under one key each (`brief_prompt`, `proposal_prompt`). This repo's `agents.py` has five genuinely distinct system prompts, and two of them carry careful behavioural constraints that would be lost if merged: `revise_proposal`'s "copy every field verbatim unless asked to change it" rules directly contradict `generate_proposal`'s merge-and-rewrite instructions. The registry therefore has `brief_generation_prompt`, `brief_refinement_prompt`, `signal_extraction_prompt`, `proposal_generation_prompt`, and `proposal_revision_prompt`.
 
@@ -2095,7 +2099,8 @@ Hardening, because this is the first genuinely public surface the system has eve
 - Login rate limiting (`flask-limiter`, e.g. 10/hour/IP) and lockout after repeated failures.
 - Session cookies `Secure`, `HttpOnly`, `SameSite=Lax`.
 - CSRF token on all state-changing talent routes.
-- **Invite-only registration.** An AM creates the `Talent`; the system emails a single-use, time-limited set-password token. With `EMAIL_DRIVER=console` the link prints to stdout, so this is testable with no vendor account. There is no open sign-up — the bench is curated.
+- ~~**Invite-only registration.**~~ **Superseded — open sign-up shipped.** `POST /api/talent/signup` lets a talent create their own account and use the portal immediately; the row is tagged `signup_source='self'` and the bench marks it *self-registered* so curation becomes a visible signal rather than a gate. The invite path still exists for the other direction (GDF added the profile first, and wants the person to take it over): `POST /api/talent/<id>/invite` emails a single-use, time-limited set-password token, and with `EMAIL_DRIVER=console` the link prints to stdout, so it stays testable with no vendor account.
+  **The one case sign-up must not swallow:** an email already on the bench with no password set. Creating an account there would hand a curated profile to anyone who knows a crew member's address, so that request returns 202 and emails a claim link instead. Covered by `tests/test_talent_signup.py`.
 
 ### 11.3 Portal surface
 
@@ -2702,7 +2707,7 @@ Named so nobody loses a week to them.
 - **Real-time speaker diarisation.** Whisper does not diarise. Doing it properly needs pyannote and a GPU. The polish pass labels obvious turn changes, which is enough for a brief.
 - **Live translation.** A mixed English/Swahili/Sheng boardroom transcribed *and* translated live produces a transcript nobody trusts. Transcribe in the spoken language; translate afterwards if ever asked.
 - **Talent payments, invoicing, payroll.** Assignments carry a day rate for scoring only. Money is a separate system and a much larger regulatory surface.
-- **A public talent marketplace.** The bench is invite-only and curated. Open sign-up changes the product, the moderation burden, and the legal exposure.
+- **A public talent marketplace.** Sign-up is now open (see §11.2) — anyone can join the bench and be considered. What is still explicitly out of scope is the *marketplace*: public talent profiles, clients browsing or booking crew directly, ratings visible between talents. GDF still does the casting; open registration only changed who may put their hand up.
 - **AI alt-text generation.** Text-and-data product. ARIA and keyboard navigation are worth far more.
 - **LangGraph / CrewAI.** Four agents, linear hand-offs. Revisit at the triggers in §14.7.
 - **Runtime-switchable database or auth.** Security and persistence surfaces get exactly one code path.

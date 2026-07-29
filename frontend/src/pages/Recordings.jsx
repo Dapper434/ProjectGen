@@ -99,7 +99,7 @@ export default function Recordings() {
         const res = await fetch(`${API}/recordings/compare`, { method: 'POST', credentials: 'include', body });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) { setError(data.error || 'Could not start the comparison.'); return; }
-        navigate('/lab/transcription');
+        navigate('/settings/lab/speech');
         return;
       }
 
