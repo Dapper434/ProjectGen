@@ -1,12 +1,12 @@
-# FactoryOS
+# The Exodus
 
 **Turning stakeholder engagement into measurable change management.**
 
 ## The Problem
 For a communications agency like GDF Kenya, a huge amount of producer and account-manager time goes into turning client conversations into usable internal documents. We listen back to meetings, write up briefs by hand, and turn second-round discussions into full client proposals—while cross-referencing rate cards and past work. It's slow, inconsistent, and relies heavily on manual translation of complex client signals. Time lost to write-ups is time lost to strategic thinking and change management.
 
-## The Solution: FactoryOS
-FactoryOS is a focused, two-agent system that sits directly on top of our real meeting workflow. It transforms raw transcripts into structured, actionable documents, giving our Account Managers a massive head start.
+## The Solution: The Exodus
+The Exodus is a focused, two-agent system that sits directly on top of our real meeting workflow. It transforms raw transcripts into structured, actionable documents, giving our Account Managers a massive head start.
 
 ![Agent Architecture Diagram](https://dummyimage.com/800x300/18181b/4f46e5&text=Transcript+%E2%86%92+Brief+Generator+%E2%86%92+Proposal+Generator+%E2%86%92+Human+Review)
 
@@ -45,4 +45,4 @@ To run the full stage demo:
    npm run dev
    ```
 
-*Note: Ensure both servers are running. FactoryOS uses SQLite for easy local development.*
+*Note: Ensure both servers are running. The Exodus uses SQLite for easy local development.*
