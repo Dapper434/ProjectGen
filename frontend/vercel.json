@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://REPLACE-WITH-URL.trycloudflare.com/api/:path*"
+      "destination": "https://projectgen-backend.onrender.com/api/:path*"
     },
     { "source": "/:path*", "destination": "/index.html" }
   ]
