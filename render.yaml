@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: projectgen-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && python migrate_schema.py && python seed.py
+    startCommand: gunicorn --workers 1 --threads 8 --bind 0.0.0.0:$PORT wsgi:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PRODUCTION
+        value: "1"
+      - key: DATABASE_URL
+        value: sqlite:///factoryos.db
+      - key: NIM_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b
+      - key: NIM_API_KEY
+        sync: false
