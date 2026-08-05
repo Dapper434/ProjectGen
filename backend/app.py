@@ -84,6 +84,12 @@ def require_role(*roles):
     return deco
 
 
+@app.route('/healthz')
+@app.route('/api/healthz')
+def healthz():
+    return jsonify({"status": "ok"})
+
+
 @app.route('/api/config')
 def get_config():
     return jsonify({"flags": Config.FLAGS, "product": "The Exodus"})
