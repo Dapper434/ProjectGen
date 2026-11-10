@@ -86,6 +86,7 @@ def require_role(*roles):
 
 @app.route('/healthz')
 @app.route('/api/healthz')
+@app.route('/api/health')
 def healthz():
     return jsonify({"status": "ok"})
 
