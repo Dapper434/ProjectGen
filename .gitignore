@@ -20,6 +20,11 @@ htmlcov/
 
 # Local application data
 backend/*.db
+backend/*.db-*
+backend/*.db.*
+*.db
+*.db-*
+*.db.*
 backend/*.sqlite
 backend/*.sqlite3
 backend/instance/
@@ -51,3 +56,6 @@ Thumbs.db
 
 # db
 factoryos.db
+
+node_modules/
+dist/
